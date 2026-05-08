@@ -1,0 +1,2565 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black"/>
+  <title>Sport & Nutrition</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    body { background:#1a1a1a; color:#f0f0f0; font-family:Georgia,serif; overscroll-behavior:none; }
+    input, textarea, button { font-family:Georgia,serif; }
+    ::-webkit-scrollbar { width:4px; }
+    ::-webkit-scrollbar-track { background:#1a1a1a; }
+    ::-webkit-scrollbar-thumb { background:#444; border-radius:2px; }
+    #root { min-height:100vh; }
+    #sync-bar { position:fixed; bottom:0; left:0; right:0; height:3px; background:transparent; z-index:9999; }
+    #sync-bar.syncing { background:linear-gradient(90deg,#d4a843,#e8c060,#d4a843); background-size:200%; animation:syncAnim 1s linear infinite; }
+    #sync-bar.error { background:#e05555; }
+    @keyframes syncAnim { 0%{background-position:0%} 100%{background-position:200%} }
+  </style>
+</head>
+<body>
+<div id="sync-bar"></div>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script>
+// ─── STOCKAGE LOCAL-FIRST + GOOGLE SHEETS BACKUP ─────────────────────────────
+// Principe : localStorage = source de vérité principale (instantané, toujours dispo)
+//            Google Sheets = backup asynchrone (quand connexion disponible)
+// La lecture ne dépend JAMAIS de Google Sheets — aucun risque de perte.
+
+const GS_URL = "https://script.google.com/macros/s/AKfycbwLeZqLV7SHMdsmadkAsBozX_VOgtwcVELTDifEGU59fFp80I2kNKWlEq8CGpf5N4Do-A/exec";
+const LS_PREFIX = "ds_"; // préfixe localStorage
+
+// Indicateur visuel de sync
+const syncBar = document.getElementById('sync-bar');
+let syncTimer = null;
+let pendingWrites = 0;
+function showSync(state) {
+  syncBar.className = state;
+  clearTimeout(syncTimer);
+  if (state === '') syncTimer = null;
+  else syncTimer = setTimeout(()=>{syncBar.className='';}, 2000);
+}
+function updateSync() {
+  if (pendingWrites > 0) showSync('syncing');
+  else showSync('');
+}
+
+// ── localStorage helpers ──────────────────────────────────────────────────────
+function lsGet(key) {
+  try {
+    // Cherche d'abord avec préfixe ds_, puis dash_ (ancien), puis sans préfixe
+    const prefixes = [LS_PREFIX, 'dash_', ''];
+    for (const p of prefixes) {
+      const v = localStorage.getItem(p + key);
+      if (v !== null) return v;
+    }
+    return null;
+  } catch { return null; }
+}
+
+function lsSet(key, valueStr) {
+  try { localStorage.setItem(LS_PREFIX + key, valueStr); } catch {}
+}
+
+// ── Google Sheets backup (fire-and-forget, sans bloquer l'UI) ────────────────
+function gsBackup(key, valueStr) {
+  // N'essaie pas depuis file:// — inutile et génère des erreurs
+  if (window.location.protocol === 'file:') return;
+  pendingWrites++;
+  updateSync();
+  fetch(GS_URL, {
+    method: 'POST',
+    mode: 'no-cors',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify({ key, value: valueStr }),
+  }).then(() => {
+    pendingWrites = Math.max(0, pendingWrites - 1);
+    updateSync();
+  }).catch(() => {
+    pendingWrites = Math.max(0, pendingWrites - 1);
+    updateSync();
+  });
+}
+
+// ── window.storage — interface compatible avec le code React ─────────────────
+window.storage = {
+  // Lecture : toujours depuis localStorage (instantané)
+  get: async (key) => {
+    const val = lsGet(key);
+    if (val !== null) return { key, value: val };
+    return null;
+  },
+  // Écriture : localStorage immédiat + GS en arrière-plan
+  set: async (key, valueStr) => {
+    lsSet(key, valueStr);
+    gsBackup(key, valueStr);
+    return { key, value: valueStr };
+  }
+};
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo } = React;
+
+// ─── PALETTE ────────────────────────────────────────────────────────────────
+// Fond général : #1a1a1a  |  Cartes : #242424  |  Cartes élevées : #2e2e2e
+// Bordures : #444  |  Texte primaire : #f0f0f0  |  Texte secondaire : #b0b0b0
+// Accent or : #d4a843  |  Vert : #5db866  |  Bleu : #4a9fd4  |  Rouge : #e05555
+
+const C = {
+  bg: "#1a1a1a",
+  card: "#242424",
+  cardHi: "#2e2e2e",
+  border: "#444444",
+  borderLight: "#555555",
+  text: "#f0f0f0",
+  textSub: "#b0b0b0",
+  textMuted: "#777777",
+  gold: "#d4a843",
+  goldLight: "#e8c060",
+  green: "#5db866",
+  greenDark: "#3a8a42",
+  blue: "#4a9fd4",
+  red: "#e05555",
+  overlay: "rgba(0,0,0,0.75)",
+};
+
+const DAYS_SHORT = ["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
+const DAYS_FULL  = ["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"];
+
+const CALISTENIE_BLOCS = {
+  A:[
+    {ex:"Planche",           sets:"3 × 45s"},
+    {ex:"Planche latérale",  sets:"2 × 30s / côté"},
+    {ex:"Relevés de jambes", sets:"3 × 10-12 reps"},
+    {ex:"Tuck L-sit",        sets:"2 × 10s"},
+  ],
+  B:[
+    {ex:"Tractions négatives", sets:"3 × 4-6 reps (4s descente)"},
+    {ex:"Dead hang",           sets:"2 × 20-30s"},
+  ],
+  C:[
+    {ex:"Dips",             sets:"3 × 6-8 reps"},
+    {ex:"Pompes tempo lent",sets:"3 × max"},
+    {ex:"Pike push-up",     sets:"2 × 8 reps"},
+  ],
+};
+
+const STRETCHES = [
+  {name:"Psoas — fente basse",       duration:"60s × 2 côtés",   priority:true},
+  {name:"Ischio-jambiers assis",      duration:"45s × 2 jambes",  priority:true},
+  {name:"Quadriceps debout",          duration:"40s × 2 jambes",  priority:false},
+  {name:"Mollets au mur",             duration:"30s × 2 × 2 jambes", priority:false},
+];
+
+// ─── BASE ALIMENTAIRE (~270 aliments, valeurs Ciqual / USDA) ────────────────
+const FOOD_DB = [
+  // ŒUFS & LAITIERS
+  {name:"Œufs brouillés (2 œufs, beurre)",  cat:"Œufs & Laitiers", cal100:175, prot100:12, unit:"g", unitG:120},
+  {name:"Œufs brouillés (2 œufs, sans beurre)", cat:"Œufs & Laitiers", cal100:140, prot100:13, unit:"g", unitG:120},
+  {name:"Œufs brouillés au lait (2 œufs)",  cat:"Œufs & Laitiers", cal100:155, prot100:12, unit:"g", unitG:130},
+  {name:"Œuf au plat",                        cat:"Œufs & Laitiers", cal100:196, prot100:13, unit:"unité", unitG:60},
+  {name:"Œuf poché",                          cat:"Œufs & Laitiers", cal100:155, prot100:13, unit:"unité", unitG:55},
+  {name:"Œufs mimosa (1/2)",                  cat:"Œufs & Laitiers", cal100:180, prot100:10, unit:"unité", unitG:60},
+  {name:"Frittata légumes (part)",            cat:"Œufs & Laitiers", cal100:130, prot100:10, unit:"g", unitG:150},
+  {name:"Œufs cocotte (2 œufs, crème)",       cat:"Œufs & Laitiers", cal100:180, prot100:12, unit:"g", unitG:130},
+  {name:"Œuf mollet",                         cat:"Œufs & Laitiers", cal100:155, prot100:13, unit:"unité", unitG:55},
+  {name:"Œufs à la florentine (2 œufs + épinards)", cat:"Plats complets", cal100:120, prot100:11, unit:"g", unitG:200},
+  {name:"Œufs benedict végétarien",           cat:"Plats complets", cal100:210, prot100:12, unit:"g", unitG:200},
+  {name:"Œufs brouillés champignons",         cat:"Plats complets", cal100:155, prot100:12, unit:"g", unitG:180},
+  {name:"Œufs brouillés épinards feta",       cat:"Plats complets", cal100:165, prot100:13, unit:"g", unitG:180},
+  {name:"Omelette fromage (2 œufs)",          cat:"Plats complets", cal100:185, prot100:14, unit:"g", unitG:150},
+  {name:"Omelette champignons (2 œufs)",      cat:"Plats complets", cal100:145, prot100:12, unit:"g", unitG:160},
+  {name:"Œuf entier",             cat:"Œufs & Laitiers", cal100:155, prot100:13, unit:"unité",       unitG:60},
+  {name:"Blancs d'œufs",          cat:"Œufs & Laitiers", cal100:52,  prot100:11, unit:"g",           unitG:100},
+  {name:"Œuf dur",                cat:"Œufs & Laitiers", cal100:155, prot100:13, unit:"unité",       unitG:60},
+  {name:"Omelette nature",         cat:"Œufs & Laitiers", cal100:154, prot100:11, unit:"g",           unitG:100},
+  {name:"Skyr nature",             cat:"Œufs & Laitiers", cal100:60,  prot100:11, unit:"g",           unitG:150},
+  {name:"Fromage blanc 0%",        cat:"Œufs & Laitiers", cal100:50,  prot100:8,  unit:"g",           unitG:150},
+  {name:"Fromage blanc 3,2%",      cat:"Œufs & Laitiers", cal100:67,  prot100:7,  unit:"g",           unitG:150},
+  {name:"Yaourt grec 0%",          cat:"Œufs & Laitiers", cal100:57,  prot100:10, unit:"g",           unitG:150},
+  {name:"Yaourt grec entier",      cat:"Œufs & Laitiers", cal100:115, prot100:9,  unit:"g",           unitG:150},
+  {name:"Yaourt nature",           cat:"Œufs & Laitiers", cal100:61,  prot100:3,  unit:"g",           unitG:125},
+  {name:"Yaourt soja",             cat:"Œufs & Laitiers", cal100:50,  prot100:3,  unit:"g",           unitG:125},
+  {name:"Kéfir",                   cat:"Œufs & Laitiers", cal100:52,  prot100:3,  unit:"ml",          unitG:200},
+  {name:"Cottage cheese",          cat:"Œufs & Laitiers", cal100:98,  prot100:11, unit:"g",           unitG:100},
+  {name:"Ricotta",                 cat:"Œufs & Laitiers", cal100:174, prot100:11, unit:"g",           unitG:80},
+  {name:"Mozzarella",              cat:"Œufs & Laitiers", cal100:280, prot100:18, unit:"g",           unitG:80},
+  {name:"Feta",                    cat:"Œufs & Laitiers", cal100:264, prot100:14, unit:"g",           unitG:50},
+  {name:"Gruyère",                 cat:"Œufs & Laitiers", cal100:415, prot100:28, unit:"g",           unitG:30},
+  {name:"Comté",                   cat:"Œufs & Laitiers", cal100:415, prot100:27, unit:"g",           unitG:30},
+  {name:"Emmental",                cat:"Œufs & Laitiers", cal100:379, prot100:28, unit:"g",           unitG:30},
+  {name:"Parmesan",                cat:"Œufs & Laitiers", cal100:431, prot100:36, unit:"g",           unitG:20},
+  {name:"Cheddar",                 cat:"Œufs & Laitiers", cal100:403, prot100:25, unit:"g",           unitG:30},
+  {name:"Camembert",               cat:"Œufs & Laitiers", cal100:300, prot100:20, unit:"g",           unitG:40},
+  {name:"Chèvre frais",            cat:"Œufs & Laitiers", cal100:230, prot100:14, unit:"g",           unitG:40},
+  {name:"Brie",                    cat:"Œufs & Laitiers", cal100:334, prot100:21, unit:"g",           unitG:40},
+  {name:"Lait demi-écrémé",        cat:"Œufs & Laitiers", cal100:46,  prot100:3,  unit:"ml",          unitG:200},
+  {name:"Lait écrémé",             cat:"Œufs & Laitiers", cal100:35,  prot100:4,  unit:"ml",          unitG:200},
+  {name:"Lait entier",             cat:"Œufs & Laitiers", cal100:64,  prot100:3,  unit:"ml",          unitG:200},
+  {name:"Lait de soja",            cat:"Œufs & Laitiers", cal100:35,  prot100:3,  unit:"ml",          unitG:250},
+  {name:"Lait d'avoine",           cat:"Œufs & Laitiers", cal100:47,  prot100:1,  unit:"ml",          unitG:250},
+  {name:"Lait d'amande",           cat:"Œufs & Laitiers", cal100:24,  prot100:1,  unit:"ml",          unitG:250},
+  {name:"Crème fraîche épaisse",   cat:"Œufs & Laitiers", cal100:292, prot100:2,  unit:"g",           unitG:30},
+  {name:"Crème fraîche légère 15%",cat:"Œufs & Laitiers", cal100:162, prot100:3,  unit:"g",           unitG:30},
+  {name:"Beurre",                  cat:"Œufs & Laitiers", cal100:745, prot100:1,  unit:"g",           unitG:10},
+  // PROTÉINES VÉGÉTALES
+  {name:"Tofu ferme",              cat:"Protéines végétales", cal100:80,  prot100:16, unit:"g",        unitG:150},
+  {name:"Tofu soyeux",             cat:"Protéines végétales", cal100:55,  prot100:6,  unit:"g",        unitG:150},
+  {name:"Tofu fumé",               cat:"Protéines végétales", cal100:135, prot100:17, unit:"g",        unitG:100},
+  {name:"Tempeh",                  cat:"Protéines végétales", cal100:190, prot100:19, unit:"g",        unitG:100},
+  {name:"Seitan",                  cat:"Protéines végétales", cal100:130, prot100:21, unit:"g",        unitG:100},
+  {name:"Edamame cuit",            cat:"Protéines végétales", cal100:122, prot100:11, unit:"g",        unitG:150},
+  {name:"PVT soja sèche",          cat:"Protéines végétales", cal100:350, prot100:52, unit:"g",        unitG:50},
+  {name:"PVT soja hydratée",       cat:"Protéines végétales", cal100:100, prot100:15, unit:"g",        unitG:100},
+  {name:"Protéine pois (poudre)",  cat:"Protéines végétales", cal100:380, prot100:80, unit:"g",        unitG:30},
+  {name:"Protéine soja (poudre)",  cat:"Protéines végétales", cal100:370, prot100:90, unit:"g",        unitG:30},
+  {name:"Quorn (mycoprotéine)",    cat:"Protéines végétales", cal100:92,  prot100:14, unit:"g",        unitG:100},
+  {name:"Steak végétal soja",      cat:"Protéines végétales", cal100:150, prot100:18, unit:"unité",    unitG:100},
+  // LÉGUMINEUSES
+  {name:"Lentilles vertes cuites", cat:"Légumineuses", cal100:116, prot100:9, unit:"g",               unitG:180},
+  {name:"Lentilles corail cuites", cat:"Légumineuses", cal100:101, prot100:8, unit:"g",               unitG:180},
+  {name:"Lentilles beluga cuites", cat:"Légumineuses", cal100:116, prot100:9, unit:"g",               unitG:180},
+  {name:"Pois chiches cuits",      cat:"Légumineuses", cal100:164, prot100:9, unit:"g",               unitG:200},
+  {name:"Pois chiches en boîte",   cat:"Légumineuses", cal100:120, prot100:7, unit:"g",               unitG:200},
+  {name:"Haricots rouges cuits",   cat:"Légumineuses", cal100:127, prot100:8, unit:"g",               unitG:180},
+  {name:"Haricots blancs cuits",   cat:"Légumineuses", cal100:130, prot100:9, unit:"g",               unitG:180},
+  {name:"Haricots noirs cuits",    cat:"Légumineuses", cal100:132, prot100:9, unit:"g",               unitG:180},
+  {name:"Pois cassés cuits",       cat:"Légumineuses", cal100:118, prot100:8, unit:"g",               unitG:180},
+  {name:"Fèves cuites",            cat:"Légumineuses", cal100:110, prot100:8, unit:"g",               unitG:150},
+  {name:"Haricots mungo cuits",    cat:"Légumineuses", cal100:105, prot100:7, unit:"g",               unitG:150},
+  {name:"Lupins cuits",            cat:"Légumineuses", cal100:119, prot100:16, unit:"g",              unitG:100},
+  {name:"Houmous",                 cat:"Légumineuses", cal100:177, prot100:8, unit:"g",               unitG:80},
+  // CÉRÉALES & FÉCULENTS
+  {name:"Flocons d'avoine",        cat:"Céréales & Féculents", cal100:370, prot100:13, unit:"g",      unitG:60},
+  {name:"Porridge (cuit)",         cat:"Céréales & Féculents", cal100:71,  prot100:2,  unit:"g",      unitG:250},
+  {name:"Muesli sans sucre",       cat:"Céréales & Féculents", cal100:370, prot100:11, unit:"g",      unitG:50},
+  {name:"Granola",                 cat:"Céréales & Féculents", cal100:420, prot100:8,  unit:"g",      unitG:50},
+  {name:"Riz blanc cuit",          cat:"Céréales & Féculents", cal100:130, prot100:3,  unit:"g",      unitG:180},
+  {name:"Riz complet cuit",        cat:"Céréales & Féculents", cal100:130, prot100:3,  unit:"g",      unitG:180},
+  {name:"Riz basmati cuit",        cat:"Céréales & Féculents", cal100:120, prot100:3,  unit:"g",      unitG:180},
+  {name:"Galette de riz soufflé",  cat:"Céréales & Féculents", cal100:382, prot100:7,  unit:"unité",  unitG:9},
+  {name:"Pâtes blanches cuites",   cat:"Céréales & Féculents", cal100:158, prot100:6,  unit:"g",      unitG:200},
+  {name:"Pâtes complètes cuites",  cat:"Céréales & Féculents", cal100:150, prot100:6,  unit:"g",      unitG:200},
+  {name:"Pâtes légumineuses cuites",cat:"Céréales & Féculents",cal100:145, prot100:10, unit:"g",      unitG:200},
+  {name:"Quinoa cuit",             cat:"Céréales & Féculents", cal100:120, prot100:4,  unit:"g",      unitG:180},
+  {name:"Boulgour cuit",           cat:"Céréales & Féculents", cal100:112, prot100:4,  unit:"g",      unitG:180},
+  {name:"Semoule cuite",           cat:"Céréales & Féculents", cal100:112, prot100:4,  unit:"g",      unitG:180},
+  {name:"Sarrasin cuit",           cat:"Céréales & Féculents", cal100:92,  prot100:3,  unit:"g",      unitG:180},
+  {name:"Millet cuit",             cat:"Céréales & Féculents", cal100:119, prot100:4,  unit:"g",      unitG:180},
+  {name:"Orge perlée cuite",       cat:"Céréales & Féculents", cal100:123, prot100:2,  unit:"g",      unitG:180},
+  {name:"Polenta cuite",           cat:"Céréales & Féculents", cal100:70,  prot100:2,  unit:"g",      unitG:200},
+  {name:"Pain complet",            cat:"Céréales & Féculents", cal100:240, prot100:9,  unit:"tranche",unitG:35},
+  {name:"Pain de seigle",          cat:"Céréales & Féculents", cal100:259, prot100:9,  unit:"tranche",unitG:35},
+  {name:"Pain blanc (baguette)",   cat:"Céréales & Féculents", cal100:275, prot100:9,  unit:"tranche",unitG:30},
+  {name:"Pain aux céréales",       cat:"Céréales & Féculents", cal100:260, prot100:9,  unit:"tranche",unitG:35},
+  {name:"Pain de mie complet",     cat:"Céréales & Féculents", cal100:241, prot100:8,  unit:"tranche",unitG:30},
+  {name:"Tortilla de blé",         cat:"Céréales & Féculents", cal100:310, prot100:8,  unit:"unité",  unitG:50},
+  {name:"Pomme de terre cuite",    cat:"Céréales & Féculents", cal100:80,  prot100:2,  unit:"unité",  unitG:150},
+  {name:"Patate douce cuite",      cat:"Céréales & Féculents", cal100:90,  prot100:2,  unit:"g",      unitG:180},
+  {name:"Purée de pommes de terre",cat:"Céréales & Féculents", cal100:100, prot100:2,  unit:"g",      unitG:200},
+  {name:"Crackers seigle",         cat:"Céréales & Féculents", cal100:320, prot100:9,  unit:"unité",  unitG:10},
+  {name:"Chips",                   cat:"Céréales & Féculents", cal100:536, prot100:6,  unit:"g",      unitG:30},
+  // LÉGUMES
+  {name:"Épinards crus",           cat:"Légumes", cal100:23,  prot100:3, unit:"g",                    unitG:100},
+  {name:"Épinards cuits",          cat:"Légumes", cal100:23,  prot100:3, unit:"g",                    unitG:200},
+  {name:"Brocoli cuit",            cat:"Légumes", cal100:35,  prot100:4, unit:"g",                    unitG:200},
+  {name:"Chou-fleur cuit",         cat:"Légumes", cal100:23,  prot100:2, unit:"g",                    unitG:200},
+  {name:"Chou kale",               cat:"Légumes", cal100:35,  prot100:3, unit:"g",                    unitG:100},
+  {name:"Chou blanc",              cat:"Légumes", cal100:25,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Choux de Bruxelles cuits",cat:"Légumes", cal100:43,  prot100:3, unit:"g",                    unitG:150},
+  {name:"Courgette cuite",         cat:"Légumes", cal100:17,  prot100:1, unit:"g",                    unitG:200},
+  {name:"Aubergine cuite",         cat:"Légumes", cal100:25,  prot100:1, unit:"g",                    unitG:200},
+  {name:"Poivron rouge cru",       cat:"Légumes", cal100:31,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Poivron vert cru",        cat:"Légumes", cal100:20,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Poivron rôti",            cat:"Légumes", cal100:28,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Tomates fraîches",        cat:"Légumes", cal100:18,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Tomates cerises",         cat:"Légumes", cal100:18,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Tomates pelées en boîte", cat:"Légumes", cal100:24,  prot100:1, unit:"g",                    unitG:200},
+  {name:"Tomates séchées",         cat:"Légumes", cal100:258, prot100:14, unit:"g",                   unitG:30},
+  {name:"Concombre",               cat:"Légumes", cal100:15,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Salade verte / laitue",   cat:"Légumes", cal100:13,  prot100:1, unit:"g",                    unitG:100},
+  {name:"Roquette",                cat:"Légumes", cal100:25,  prot100:3, unit:"g",                    unitG:60},
+  {name:"Mâche",                   cat:"Légumes", cal100:21,  prot100:2, unit:"g",                    unitG:80},
+  {name:"Carottes crues",          cat:"Légumes", cal100:41,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Carottes cuites",         cat:"Légumes", cal100:35,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Betterave cuite",         cat:"Légumes", cal100:44,  prot100:2, unit:"g",                    unitG:100},
+  {name:"Champignons de Paris crus",cat:"Légumes",cal100:22,  prot100:3, unit:"g",                   unitG:100},
+  {name:"Champignons sautés",      cat:"Légumes", cal100:26,  prot100:3, unit:"g",                    unitG:150},
+  {name:"Champignons shiitake",    cat:"Légumes", cal100:34,  prot100:2, unit:"g",                    unitG:100},
+  {name:"Asperges cuites",         cat:"Légumes", cal100:20,  prot100:2, unit:"g",                    unitG:150},
+  {name:"Haricots verts cuits",    cat:"Légumes", cal100:31,  prot100:2, unit:"g",                    unitG:150},
+  {name:"Petits pois cuits",       cat:"Légumes", cal100:84,  prot100:5, unit:"g",                    unitG:100},
+  {name:"Maïs en boîte",           cat:"Légumes", cal100:86,  prot100:3, unit:"g",                    unitG:100},
+  {name:"Artichaut cuit",          cat:"Légumes", cal100:53,  prot100:3, unit:"g",                    unitG:150},
+  {name:"Céleri branche",          cat:"Légumes", cal100:17,  prot100:1, unit:"g",                    unitG:100},
+  {name:"Fenouil cru",             cat:"Légumes", cal100:31,  prot100:1, unit:"g",                    unitG:150},
+  {name:"Poireau cuit",            cat:"Légumes", cal100:31,  prot100:2, unit:"g",                    unitG:150},
+  {name:"Oignon cru",              cat:"Légumes", cal100:40,  prot100:1, unit:"g",                    unitG:80},
+  {name:"Ail",                     cat:"Légumes", cal100:149, prot100:6, unit:"g",                    unitG:5},
+  {name:"Avocat",                  cat:"Légumes", cal100:160, prot100:2, unit:"unité",                unitG:150},
+  {name:"Ratatouille maison",      cat:"Légumes", cal100:60,  prot100:2, unit:"g",                    unitG:200},
+  {name:"Soupe de légumes",        cat:"Légumes", cal100:40,  prot100:2, unit:"ml",                   unitG:300},
+  {name:"Velouté butternut",       cat:"Légumes", cal100:52,  prot100:1, unit:"ml",                   unitG:300},
+  {name:"Courge butternut cuite",  cat:"Légumes", cal100:45,  prot100:1, unit:"g",                    unitG:200},
+  {name:"Potimarron cuit",         cat:"Légumes", cal100:47,  prot100:2, unit:"g",                    unitG:200},
+  // FRUITS
+  {name:"Banane",                  cat:"Fruits", cal100:89,  prot100:1, unit:"unité",                 unitG:120},
+  {name:"Pomme",                   cat:"Fruits", cal100:52,  prot100:0, unit:"unité",                 unitG:150},
+  {name:"Poire",                   cat:"Fruits", cal100:57,  prot100:0, unit:"unité",                 unitG:160},
+  {name:"Orange",                  cat:"Fruits", cal100:47,  prot100:1, unit:"unité",                 unitG:150},
+  {name:"Clémentine",              cat:"Fruits", cal100:47,  prot100:1, unit:"unité",                 unitG:80},
+  {name:"Kiwi",                    cat:"Fruits", cal100:61,  prot100:1, unit:"unité",                 unitG:80},
+  {name:"Mangue",                  cat:"Fruits", cal100:60,  prot100:1, unit:"g",                     unitG:200},
+  {name:"Ananas",                  cat:"Fruits", cal100:50,  prot100:1, unit:"g",                     unitG:200},
+  {name:"Fraises",                 cat:"Fruits", cal100:33,  prot100:1, unit:"g",                     unitG:150},
+  {name:"Framboises",              cat:"Fruits", cal100:52,  prot100:1, unit:"g",                     unitG:100},
+  {name:"Myrtilles",               cat:"Fruits", cal100:57,  prot100:1, unit:"g",                     unitG:100},
+  {name:"Raisins frais",           cat:"Fruits", cal100:69,  prot100:1, unit:"g",                     unitG:100},
+  {name:"Pêche",                   cat:"Fruits", cal100:39,  prot100:1, unit:"unité",                 unitG:150},
+  {name:"Abricot",                 cat:"Fruits", cal100:48,  prot100:1, unit:"unité",                 unitG:40},
+  {name:"Cerise",                  cat:"Fruits", cal100:63,  prot100:1, unit:"g",                     unitG:100},
+  {name:"Pastèque",                cat:"Fruits", cal100:30,  prot100:1, unit:"g",                     unitG:300},
+  {name:"Melon",                   cat:"Fruits", cal100:34,  prot100:1, unit:"g",                     unitG:200},
+  {name:"Grenade",                 cat:"Fruits", cal100:83,  prot100:2, unit:"g",                     unitG:150},
+  {name:"Raisins secs",            cat:"Fruits", cal100:299, prot100:3, unit:"g",                     unitG:30},
+  {name:"Abricots secs",           cat:"Fruits", cal100:241, prot100:3, unit:"g",                     unitG:30},
+  {name:"Dattes",                  cat:"Fruits", cal100:282, prot100:2, unit:"unité",                 unitG:20},
+  {name:"Pruneaux",                cat:"Fruits", cal100:240, prot100:2, unit:"unité",                 unitG:25},
+  {name:"Compote pomme sans sucre",cat:"Fruits", cal100:44,  prot100:0, unit:"g",                     unitG:100},
+  // OLÉAGINEUX & GRAINES
+  {name:"Amandes",                 cat:"Oléagineux", cal100:580, prot100:21, unit:"g",                unitG:30},
+  {name:"Noix",                    cat:"Oléagineux", cal100:650, prot100:15, unit:"g",                unitG:30},
+  {name:"Noix de cajou",           cat:"Oléagineux", cal100:553, prot100:18, unit:"g",                unitG:30},
+  {name:"Noisettes",               cat:"Oléagineux", cal100:628, prot100:15, unit:"g",                unitG:30},
+  {name:"Pistaches",               cat:"Oléagineux", cal100:562, prot100:20, unit:"g",                unitG:30},
+  {name:"Cacahuètes",              cat:"Oléagineux", cal100:567, prot100:26, unit:"g",                unitG:30},
+  {name:"Noix du Brésil",          cat:"Oléagineux", cal100:656, prot100:14, unit:"g",                unitG:20},
+  {name:"Noix de pécan",           cat:"Oléagineux", cal100:690, prot100:9,  unit:"g",                unitG:20},
+  {name:"Beurre de cacahuète",     cat:"Oléagineux", cal100:590, prot100:25, unit:"g",                unitG:20},
+  {name:"Beurre d'amande",         cat:"Oléagineux", cal100:614, prot100:21, unit:"g",                unitG:20},
+  {name:"Beurre de cajou",         cat:"Oléagineux", cal100:587, prot100:17, unit:"g",                unitG:20},
+  {name:"Graines de chia",         cat:"Oléagineux", cal100:486, prot100:17, unit:"g",                unitG:20},
+  {name:"Graines de lin",          cat:"Oléagineux", cal100:534, prot100:18, unit:"g",                unitG:15},
+  {name:"Graines de tournesol",    cat:"Oléagineux", cal100:584, prot100:21, unit:"g",                unitG:20},
+  {name:"Graines de courge",       cat:"Oléagineux", cal100:559, prot100:30, unit:"g",                unitG:20},
+  {name:"Graines de sésame",       cat:"Oléagineux", cal100:573, prot100:18, unit:"g",                unitG:15},
+  {name:"Graines de chanvre",      cat:"Oléagineux", cal100:553, prot100:32, unit:"g",                unitG:20},
+  {name:"Tahini (purée sésame)",   cat:"Oléagineux", cal100:595, prot100:17, unit:"g",                unitG:15},
+  {name:"Mix noix variées",        cat:"Oléagineux", cal100:610, prot100:18, unit:"g",                unitG:30},
+  // MATIÈRES GRASSES & CONDIMENTS
+  {name:"Huile d'olive",           cat:"Graisses & Sauces", cal100:900, prot100:0, unit:"c. à soupe", unitG:10},
+  {name:"Huile de coco",           cat:"Graisses & Sauces", cal100:900, prot100:0, unit:"c. à soupe", unitG:10},
+  {name:"Huile de colza",          cat:"Graisses & Sauces", cal100:900, prot100:0, unit:"c. à soupe", unitG:10},
+  {name:"Huile de lin",            cat:"Graisses & Sauces", cal100:900, prot100:0, unit:"c. à café",  unitG:5},
+  {name:"Vinaigrette maison",      cat:"Graisses & Sauces", cal100:330, prot100:0, unit:"c. à soupe", unitG:15},
+  {name:"Sauce soja",              cat:"Graisses & Sauces", cal100:60,  prot100:8, unit:"c. à soupe", unitG:15},
+  {name:"Miso blanc",              cat:"Graisses & Sauces", cal100:206, prot100:12,unit:"c. à soupe", unitG:20},
+  {name:"Ketchup",                 cat:"Graisses & Sauces", cal100:112, prot100:1, unit:"c. à soupe", unitG:15},
+  {name:"Moutarde",                cat:"Graisses & Sauces", cal100:66,  prot100:4, unit:"c. à café",  unitG:5},
+  {name:"Mayonnaise",              cat:"Graisses & Sauces", cal100:680, prot100:1, unit:"c. à soupe", unitG:15},
+  {name:"Sauce tomate maison",     cat:"Graisses & Sauces", cal100:50,  prot100:2, unit:"g",          unitG:150},
+  {name:"Pesto vert",              cat:"Graisses & Sauces", cal100:430, prot100:7, unit:"g",          unitG:30},
+  {name:"Guacamole",               cat:"Graisses & Sauces", cal100:150, prot100:2, unit:"g",          unitG:80},
+  {name:"Miel",                    cat:"Graisses & Sauces", cal100:304, prot100:0, unit:"c. à café",  unitG:10},
+  {name:"Confiture",               cat:"Graisses & Sauces", cal100:250, prot100:0, unit:"c. à café",  unitG:15},
+  {name:"Sirop d'érable",          cat:"Graisses & Sauces", cal100:260, prot100:0, unit:"c. à soupe", unitG:15},
+  // PLATS COMPLETS
+  {name:"Quiche lorraine (1 part)",cat:"Plats complets", cal100:290, prot100:10, unit:"part",         unitG:150},
+  {name:"Curry de lentilles corail",cat:"Plats complets",cal100:110, prot100:6,  unit:"g",            unitG:350},
+  {name:"Dhal de lentilles",       cat:"Plats complets", cal100:105, prot100:6,  unit:"g",            unitG:350},
+  {name:"Bowl quinoa légumes tofu",cat:"Plats complets", cal100:120, prot100:8,  unit:"g",            unitG:400},
+  {name:"Salade composée protéinée",cat:"Plats complets",cal100:130, prot100:9,  unit:"g",            unitG:300},
+  {name:"Poêlée tofu légumes",     cat:"Plats complets", cal100:100, prot100:8,  unit:"g",            unitG:300},
+  {name:"Omelette aux légumes (2 œufs)",cat:"Plats complets",cal100:130,prot100:10,unit:"g",         unitG:200},
+  {name:"Quiche végétarienne (1 part)",cat:"Plats complets",cal100:230,prot100:8,unit:"part",        unitG:120},
+  {name:"Gratin de légumes fromage",cat:"Plats complets",cal100:140, prot100:6,  unit:"g",            unitG:300},
+  {name:"Pâtes pesto parmesan",    cat:"Plats complets", cal100:200, prot100:8,  unit:"g",            unitG:300},
+  {name:"Riz sauté œuf légumes",   cat:"Plats complets", cal100:160, prot100:6,  unit:"g",            unitG:300},
+  {name:"Falafels",                cat:"Plats complets", cal100:333, prot100:13, unit:"unité",        unitG:40},
+  {name:"Wrap légumes houmous",    cat:"Plats complets", cal100:210, prot100:8,  unit:"unité",        unitG:200},
+  {name:"Pizza végétarienne (1 part)",cat:"Plats complets",cal100:220,prot100:10,unit:"part",        unitG:150},
+  {name:"Chili sin carne",         cat:"Plats complets", cal100:120, prot100:7,  unit:"g",            unitG:350},
+  {name:"Taboulé végétarien",      cat:"Plats complets", cal100:140, prot100:4,  unit:"g",            unitG:200},
+  {name:"Shakshuka (2 œufs)",      cat:"Plats complets", cal100:100, prot100:7,  unit:"g",            unitG:300},
+  {name:"Pancakes protéinés (2)",  cat:"Plats complets", cal100:180, prot100:14, unit:"unité",        unitG:80},
+  {name:"Soupe miso tofu",         cat:"Plats complets", cal100:35,  prot100:3,  unit:"ml",           unitG:300},
+  // SNACKS & PETIT-DÉJEUNER
+  {name:"Overnight oats skyr+avoine",cat:"Snacks & Petit-déj",cal100:110,prot100:8,unit:"g",         unitG:300},
+  {name:"Toast avocat œuf",        cat:"Snacks & Petit-déj", cal100:220, prot100:10, unit:"unité",   unitG:180},
+  {name:"Barre de céréales nature",cat:"Snacks & Petit-déj", cal100:390, prot100:7,  unit:"unité",   unitG:40},
+  {name:"Barre protéinée végane",  cat:"Snacks & Petit-déj", cal100:350, prot100:20, unit:"unité",   unitG:60},
+  {name:"Pudding de chia",         cat:"Snacks & Petit-déj", cal100:130, prot100:5,  unit:"g",       unitG:200},
+  {name:"Muffin protéiné maison",  cat:"Snacks & Petit-déj", cal100:230, prot100:12, unit:"unité",   unitG:80},
+  {name:"Chocolat noir 70%",       cat:"Snacks & Petit-déj", cal100:546, prot100:5,  unit:"g",       unitG:20},
+  {name:"Chocolat noir 85%",       cat:"Snacks & Petit-déj", cal100:590, prot100:7,  unit:"g",       unitG:20},
+  {name:"Crêpe nature",            cat:"Snacks & Petit-déj", cal100:200, prot100:6,  unit:"unité",   unitG:80},
+  {name:"Croissant",               cat:"Snacks & Petit-déj", cal100:406, prot100:8,  unit:"unité",   unitG:60},
+  {name:"Pain au chocolat",        cat:"Snacks & Petit-déj", cal100:410, prot100:7,  unit:"unité",   unitG:80},
+  {name:"Riz au lait végétal",     cat:"Snacks & Petit-déj", cal100:100, prot100:3,  unit:"g",       unitG:200},
+  {name:"Smoothie bowl protéiné",  cat:"Snacks & Petit-déj", cal100:130, prot100:10, unit:"g",       unitG:300},
+  // BOISSONS
+  {name:"Eau",                     cat:"Boissons", cal100:0,  prot100:0, unit:"ml",                  unitG:500},
+  {name:"Café noir",               cat:"Boissons", cal100:2,  prot100:0, unit:"ml",                  unitG:200},
+  {name:"Café au lait végétal",    cat:"Boissons", cal100:28, prot100:1, unit:"ml",                  unitG:200},
+  {name:"Thé / infusion",          cat:"Boissons", cal100:1,  prot100:0, unit:"ml",                  unitG:250},
+  {name:"Jus d'orange pressé",     cat:"Boissons", cal100:45, prot100:1, unit:"ml",                  unitG:200},
+  {name:"Smoothie fruits maison",  cat:"Boissons", cal100:60, prot100:1, unit:"ml",                  unitG:300},
+  {name:"Shake protéiné pois/soja",cat:"Boissons", cal100:110,prot100:20,unit:"ml",                  unitG:300},
+  {name:"Kombucha",                cat:"Boissons", cal100:17, prot100:0, unit:"ml",                  unitG:250},
+  {name:"Soda (cola)",             cat:"Boissons", cal100:42, prot100:0, unit:"ml",                  unitG:330},
+  {name:"Bière classique",         cat:"Boissons", cal100:43, prot100:0, unit:"ml",                  unitG:330},
+  {name:"Vin rouge (verre)",       cat:"Boissons", cal100:85, prot100:0, unit:"ml",                  unitG:150},
+  {name:"Vin blanc (verre)",       cat:"Boissons", cal100:77, prot100:0, unit:"ml",                  unitG:150},
+  {name:"Eau gazeuse",             cat:"Boissons", cal100:0,  prot100:0, unit:"ml",                  unitG:500},
+  {name:"Jus de tomate",           cat:"Boissons", cal100:17, prot100:1, unit:"ml",                  unitG:200},
+  {name:"Lait chocolaté",          cat:"Boissons", cal100:75, prot100:3, unit:"ml",                  unitG:250},
+  {name:"Cidre demi-sec (verre)",  cat:"Boissons", cal100:50, prot100:0, unit:"ml",                  unitG:200},
+  {name:"Champagne (flûte)",       cat:"Boissons", cal100:76, prot100:0, unit:"ml",                  unitG:125},
+  // CÉRÉALES supplémentaires
+  {name:"Semoule fine cuite",      cat:"Céréales & Féculents", cal100:112, prot100:4, unit:"g",      unitG:200},
+  {name:"Semoule complète cuite",  cat:"Céréales & Féculents", cal100:110, prot100:4, unit:"g",      unitG:200},
+  {name:"Pain pita",               cat:"Céréales & Féculents", cal100:275, prot100:9, unit:"unité",  unitG:60},
+  {name:"Naan nature",             cat:"Céréales & Féculents", cal100:310, prot100:9, unit:"unité",  unitG:80},
+  {name:"Son d'avoine",            cat:"Céréales & Féculents", cal100:383, prot100:18, unit:"g",     unitG:20},
+  {name:"Germe de blé",            cat:"Céréales & Féculents", cal100:360, prot100:23, unit:"g",     unitG:20},
+  {name:"Gnocchi nature cuits",    cat:"Céréales & Féculents", cal100:170, prot100:4, unit:"g",      unitG:200},
+  {name:"Frites au four",          cat:"Céréales & Féculents", cal100:156, prot100:3, unit:"g",      unitG:150},
+  {name:"Igname cuite",            cat:"Céréales & Féculents", cal100:118, prot100:2, unit:"g",      unitG:180},
+  // LÉGUMES supplémentaires
+  {name:"Pak choï cuit",           cat:"Légumes", cal100:13,  prot100:1, unit:"g",                   unitG:150},
+  {name:"Navet cuit",              cat:"Légumes", cal100:22,  prot100:1, unit:"g",                   unitG:150},
+  {name:"Panais cuit",             cat:"Légumes", cal100:71,  prot100:1, unit:"g",                   unitG:150},
+  {name:"Mélange légumes surgelés",cat:"Légumes", cal100:55,  prot100:3, unit:"g",                   unitG:200},
+  {name:"Olives noires",           cat:"Légumes", cal100:145, prot100:1, unit:"g",                   unitG:30},
+  {name:"Olives vertes",           cat:"Légumes", cal100:145, prot100:1, unit:"g",                   unitG:30},
+  {name:"Cornichons",              cat:"Légumes", cal100:15,  prot100:1, unit:"g",                   unitG:30},
+  {name:"Choucroute cuite",        cat:"Légumes", cal100:19,  prot100:1, unit:"g",                   unitG:150},
+  {name:"Kimchi",                  cat:"Légumes", cal100:15,  prot100:1, unit:"g",                   unitG:80},
+  {name:"Algues nori (feuille)",   cat:"Légumes", cal100:35,  prot100:6, unit:"unité",               unitG:3},
+  {name:"Pleurotes sautés",        cat:"Légumes", cal100:30,  prot100:3, unit:"g",                   unitG:100},
+  // FRUITS supplémentaires
+  {name:"Papaye",                  cat:"Fruits", cal100:43,  prot100:1, unit:"g",                    unitG:200},
+  {name:"Litchi",                  cat:"Fruits", cal100:66,  prot100:1, unit:"g",                    unitG:100},
+  {name:"Mûres",                   cat:"Fruits", cal100:43,  prot100:1, unit:"g",                    unitG:100},
+  {name:"Baies de goji séchées",   cat:"Fruits", cal100:349, prot100:14, unit:"g",                   unitG:20},
+  {name:"Figues séchées",          cat:"Fruits", cal100:249, prot100:3, unit:"unité",                unitG:20},
+  {name:"Jus de citron",           cat:"Fruits", cal100:22,  prot100:0, unit:"c. à soupe",           unitG:15},
+  // LAITIERS supplémentaires
+  {name:"Mascarpone",              cat:"Œufs & Laitiers", cal100:429, prot100:5,  unit:"g",          unitG:50},
+  {name:"Roquefort",               cat:"Œufs & Laitiers", cal100:369, prot100:21, unit:"g",          unitG:30},
+  {name:"Gorgonzola",              cat:"Œufs & Laitiers", cal100:354, prot100:19, unit:"g",          unitG:30},
+  {name:"Raclette (fromage)",      cat:"Œufs & Laitiers", cal100:357, prot100:23, unit:"g",          unitG:30},
+  {name:"Lait de coco (boîte)",    cat:"Œufs & Laitiers", cal100:197, prot100:2,  unit:"ml",         unitG:100},
+  {name:"Lait de coco léger",      cat:"Œufs & Laitiers", cal100:85,  prot100:1,  unit:"ml",         unitG:100},
+  {name:"Crème de soja",           cat:"Œufs & Laitiers", cal100:150, prot100:2,  unit:"g",          unitG:30},
+  // SAUCES & ÉPICES supplémentaires
+  {name:"Harissa",                 cat:"Graisses & Sauces", cal100:130, prot100:4, unit:"c. à café", unitG:10},
+  {name:"Ras el hanout",           cat:"Graisses & Sauces", cal100:330, prot100:14, unit:"c. à café",unitG:3},
+  {name:"Curry en poudre",         cat:"Graisses & Sauces", cal100:325, prot100:13, unit:"c. à café",unitG:3},
+  {name:"Garam masala",            cat:"Graisses & Sauces", cal100:350, prot100:14, unit:"c. à café",unitG:3},
+  {name:"Coulis de tomate",        cat:"Graisses & Sauces", cal100:35,  prot100:1, unit:"g",         unitG:100},
+  {name:"Concentré de tomate",     cat:"Graisses & Sauces", cal100:82,  prot100:4, unit:"c. à soupe",unitG:20},
+  {name:"Sauce teriyaki",          cat:"Graisses & Sauces", cal100:90,  prot100:4, unit:"c. à soupe",unitG:15},
+  {name:"Sauce sriracha",          cat:"Graisses & Sauces", cal100:93,  prot100:2, unit:"c. à café", unitG:5},
+  {name:"Vinaigre balsamique",     cat:"Graisses & Sauces", cal100:88,  prot100:0, unit:"c. à soupe",unitG:15},
+  {name:"Levure nutritionnelle",   cat:"Graisses & Sauces", cal100:325, prot100:45, unit:"g",        unitG:15},
+  {name:"Sauce chermoula",         cat:"Graisses & Sauces", cal100:120, prot100:2, unit:"g",         unitG:30},
+  {name:"Sauce bolognaise végétale",cat:"Graisses & Sauces",cal100:70,  prot100:4, unit:"g",         unitG:150},
+  // PLATS COMPLETS — COUSCOUS
+  {name:"Couscous nature (semoule)",        cat:"Plats complets", cal100:112, prot100:4, unit:"g",   unitG:250},
+  {name:"Couscous aux légumes",             cat:"Plats complets", cal100:105, prot100:4, unit:"g",   unitG:400},
+  {name:"Couscous aux pois chiches",        cat:"Plats complets", cal100:115, prot100:5, unit:"g",   unitG:400},
+  {name:"Couscous + ratatouille",           cat:"Plats complets", cal100:95,  prot100:3, unit:"g",   unitG:450},
+  {name:"Couscous + merguez végétales",     cat:"Plats complets", cal100:130, prot100:7, unit:"g",   unitG:400},
+  {name:"Couscous royal végétarien",        cat:"Plats complets", cal100:120, prot100:6, unit:"g",   unitG:450},
+  // PLATS COMPLETS — TAJINES
+  {name:"Tajine de légumes",                cat:"Plats complets", cal100:80,  prot100:3, unit:"g",   unitG:350},
+  {name:"Tajine pois chiches & abricots",   cat:"Plats complets", cal100:120, prot100:5, unit:"g",   unitG:350},
+  {name:"Tajine légumes & tofu",            cat:"Plats complets", cal100:100, prot100:7, unit:"g",   unitG:350},
+  // PLATS COMPLETS — RIZ AU CURRY
+  {name:"Riz au curry légumes",             cat:"Plats complets", cal100:130, prot100:4, unit:"g",   unitG:350},
+  {name:"Riz au curry lentilles corail",    cat:"Plats complets", cal100:125, prot100:6, unit:"g",   unitG:400},
+  {name:"Riz au curry pois chiches",        cat:"Plats complets", cal100:135, prot100:6, unit:"g",   unitG:400},
+  {name:"Riz basmati + curry tofu",         cat:"Plats complets", cal100:140, prot100:8, unit:"g",   unitG:400},
+  {name:"Curry de légumes (sans riz)",      cat:"Plats complets", cal100:90,  prot100:4, unit:"g",   unitG:300},
+  {name:"Curry vert thaï tofu",             cat:"Plats complets", cal100:115, prot100:7, unit:"g",   unitG:350},
+  {name:"Curry rouge lait de coco légumes", cat:"Plats complets", cal100:130, prot100:4, unit:"g",   unitG:350},
+  {name:"Biriyani végétarien",              cat:"Plats complets", cal100:145, prot100:5, unit:"g",   unitG:350},
+  // PLATS COMPLETS — RATATOUILLE
+  {name:"Ratatouille seule",                cat:"Plats complets", cal100:60,  prot100:2, unit:"g",   unitG:300},
+  {name:"Ratatouille + œuf poché",          cat:"Plats complets", cal100:80,  prot100:7, unit:"g",   unitG:300},
+  {name:"Ratatouille + quinoa",             cat:"Plats complets", cal100:95,  prot100:4, unit:"g",   unitG:400},
+  {name:"Ratatouille + fromage de chèvre",  cat:"Plats complets", cal100:100, prot100:5, unit:"g",   unitG:300},
+  {name:"Tian de légumes gratiné",          cat:"Plats complets", cal100:85,  prot100:4, unit:"g",   unitG:300},
+  // PLATS COMPLETS — SOUPES
+  {name:"Soupe à l'oignon gratinée",        cat:"Plats complets", cal100:80,  prot100:4, unit:"ml",  unitG:300},
+  {name:"Gaspacho tomate",                  cat:"Plats complets", cal100:35,  prot100:1, unit:"ml",  unitG:300},
+  {name:"Velouté champignons",              cat:"Plats complets", cal100:60,  prot100:2, unit:"ml",  unitG:300},
+  {name:"Minestrone végétarien",            cat:"Plats complets", cal100:55,  prot100:3, unit:"ml",  unitG:400},
+  {name:"Soupe de pois cassés",             cat:"Plats complets", cal100:85,  prot100:5, unit:"ml",  unitG:300},
+  {name:"Potage Saint-Germain",             cat:"Plats complets", cal100:75,  prot100:5, unit:"ml",  unitG:300},
+  // PLATS COMPLETS — DIVERS
+  {name:"Moussaka végétarienne",            cat:"Plats complets", cal100:130, prot100:6, unit:"g",   unitG:300},
+  {name:"Gratin dauphinois",                cat:"Plats complets", cal100:180, prot100:5, unit:"g",   unitG:250},
+  {name:"Risotto champignons parmesan",     cat:"Plats complets", cal100:155, prot100:6, unit:"g",   unitG:300},
+  {name:"Risotto légumes",                  cat:"Plats complets", cal100:140, prot100:5, unit:"g",   unitG:300},
+  {name:"Paella végétarienne",              cat:"Plats complets", cal100:145, prot100:5, unit:"g",   unitG:350},
+  {name:"Burger végétarien maison",         cat:"Plats complets", cal100:250, prot100:14, unit:"unité",unitG:220},
+  {name:"Sandwich végétarien",              cat:"Plats complets", cal100:210, prot100:10, unit:"unité",unitG:200},
+  {name:"Burritos végétariens",             cat:"Plats complets", cal100:220, prot100:9, unit:"unité", unitG:250},
+  {name:"Pad thaï végétarien",              cat:"Plats complets", cal100:175, prot100:9, unit:"g",   unitG:350},
+  {name:"Wok légumes tofu vermicelles",     cat:"Plats complets", cal100:110, prot100:6, unit:"g",   unitG:350},
+  {name:"Poke bowl végétarien",             cat:"Plats complets", cal100:140, prot100:8, unit:"g",   unitG:400},
+  {name:"Tarte aux légumes maison",         cat:"Plats complets", cal100:230, prot100:6, unit:"part",unitG:150},
+  {name:"Salade niçoise végétarienne",      cat:"Plats complets", cal100:110, prot100:6, unit:"g",   unitG:300},
+  {name:"Soupe lentilles corail lait de coco", cat:"Plats complets", cal100:95, prot100:5, unit:"ml", unitG:350},
+  // PETIT-DÉJEUNER COMPLETS
+  {name:"Porridge banane miel",                cat:"Plats complets", cal100:130, prot100:4,  unit:"g",    unitG:300},
+  {name:"Porridge protéiné skyr fruits",       cat:"Plats complets", cal100:115, prot100:8,  unit:"g",    unitG:350},
+  {name:"Bowl açaï banane granola",            cat:"Plats complets", cal100:160, prot100:4,  unit:"g",    unitG:300},
+  {name:"Tartines avocat tomates",             cat:"Plats complets", cal100:190, prot100:5,  unit:"g",    unitG:180},
+  {name:"Tartines beurre de cacahuète banane", cat:"Plats complets", cal100:290, prot100:9,  unit:"g",    unitG:150},
+  {name:"Yaourt granola fruits rouges",        cat:"Plats complets", cal100:140, prot100:6,  unit:"g",    unitG:250},
+  {name:"Skyr fruits secs noix",              cat:"Plats complets", cal100:155, prot100:10, unit:"g",    unitG:200},
+  {name:"Pancakes avoine banane (3)",          cat:"Plats complets", cal100:195, prot100:8,  unit:"unité",unitG:80},
+  {name:"Toast pain complet fromage blanc",    cat:"Plats complets", cal100:160, prot100:9,  unit:"g",    unitG:150},
+  {name:"Crêpes sarrasin garnie (2)",         cat:"Plats complets", cal100:210, prot100:9,  unit:"unité",unitG:120},
+  // SALADES COMPLÈTES
+  {name:"Salade César végétarienne",           cat:"Plats complets", cal100:145, prot100:7,  unit:"g",    unitG:300},
+  {name:"Salade grecque",                      cat:"Plats complets", cal100:130, prot100:5,  unit:"g",    unitG:250},
+  {name:"Salade lentilles betterave chèvre",   cat:"Plats complets", cal100:135, prot100:7,  unit:"g",    unitG:280},
+  {name:"Salade pois chiches légumes rôtis",   cat:"Plats complets", cal100:140, prot100:6,  unit:"g",    unitG:300},
+  {name:"Salade quinoa avocat feta",           cat:"Plats complets", cal100:155, prot100:6,  unit:"g",    unitG:300},
+  {name:"Salade taboulé libanais",             cat:"Plats complets", cal100:120, prot100:3,  unit:"g",    unitG:250},
+  {name:"Salade de chou rouge carottes",       cat:"Plats complets", cal100:80,  prot100:2,  unit:"g",    unitG:200},
+  {name:"Salade fattoush",                     cat:"Plats complets", cal100:95,  prot100:3,  unit:"g",    unitG:250},
+  {name:"Salade mexicaine haricots noirs maïs",cat:"Plats complets", cal100:130, prot100:5,  unit:"g",    unitG:280},
+  {name:"Salade thaïe mangue cacahuètes",      cat:"Plats complets", cal100:115, prot100:4,  unit:"g",    unitG:250},
+  {name:"Salade waldorf végétarienne",         cat:"Plats complets", cal100:145, prot100:4,  unit:"g",    unitG:200},
+  {name:"Bowl buddha tofu rôti",              cat:"Plats complets", cal100:135, prot100:8,  unit:"g",    unitG:400},
+  {name:"Bowl falafel houmous",               cat:"Plats complets", cal100:195, prot100:8,  unit:"g",    unitG:350},
+  // CUISINE ITALIENNE
+  {name:"Pâtes tomate basilic",               cat:"Plats complets", cal100:155, prot100:5,  unit:"g",    unitG:300},
+  {name:"Pâtes arrabiata",                    cat:"Plats complets", cal100:150, prot100:5,  unit:"g",    unitG:300},
+  {name:"Pâtes carbonara végétarienne",        cat:"Plats complets", cal100:210, prot100:9,  unit:"g",    unitG:300},
+  {name:"Pâtes primavera légumes",             cat:"Plats complets", cal100:145, prot100:6,  unit:"g",    unitG:320},
+  {name:"Pâtes puttanesca végétarienne",       cat:"Plats complets", cal100:160, prot100:5,  unit:"g",    unitG:300},
+  {name:"Gnocchi sauce tomate mozzarella",     cat:"Plats complets", cal100:190, prot100:8,  unit:"g",    unitG:300},
+  {name:"Risotto parmesan champignons",        cat:"Plats complets", cal100:165, prot100:6,  unit:"g",    unitG:300},
+  {name:"Risotto asperges citron",            cat:"Plats complets", cal100:155, prot100:5,  unit:"g",    unitG:300},
+  {name:"Pizza margherita (part)",            cat:"Plats complets", cal100:235, prot100:10, unit:"part", unitG:150},
+  {name:"Pizza quatre fromages (part)",        cat:"Plats complets", cal100:270, prot100:13, unit:"part", unitG:150},
+  {name:"Lasagnes légumes ricotta",           cat:"Plats complets", cal100:145, prot100:7,  unit:"g",    unitG:300},
+  {name:"Minestrone complet",                  cat:"Plats complets", cal100:65,  prot100:3,  unit:"ml",   unitG:400},
+  {name:"Bruschetta tomate basilic (2)",       cat:"Plats complets", cal100:175, prot100:5,  unit:"unité",unitG:80},
+  {name:"Panzanella (salade pain tomate)",     cat:"Plats complets", cal100:130, prot100:4,  unit:"g",    unitG:250},
+  // CUISINE ASIATIQUE
+  {name:"Riz cantonais végétarien",            cat:"Plats complets", cal100:155, prot100:5,  unit:"g",    unitG:300},
+  {name:"Nouilles soba légumes",              cat:"Plats complets", cal100:130, prot100:5,  unit:"g",    unitG:300},
+  {name:"Nouilles udon miso tofu",            cat:"Plats complets", cal100:115, prot100:6,  unit:"g",    unitG:350},
+  {name:"Ramen végétarien",                   cat:"Plats complets", cal100:95,  prot100:5,  unit:"ml",   unitG:450},
+  {name:"Wok riz brun légumes",              cat:"Plats complets", cal100:130, prot100:4,  unit:"g",    unitG:350},
+  {name:"Fried rice œuf légumes",            cat:"Plats complets", cal100:165, prot100:6,  unit:"g",    unitG:300},
+  {name:"Maki végétarien (8 pièces)",         cat:"Plats complets", cal100:145, prot100:3,  unit:"unité",unitG:25},
+  {name:"California roll avocat concombre",   cat:"Plats complets", cal100:155, prot100:3,  unit:"unité",unitG:25},
+  {name:"Gyoza légumes vapeur (5 pièces)",    cat:"Plats complets", cal100:145, prot100:5,  unit:"unité",unitG:35},
+  {name:"Spring rolls végétariens (2)",       cat:"Plats complets", cal100:120, prot100:3,  unit:"unité",unitG:80},
+  {name:"Soupe pho végétarienne",             cat:"Plats complets", cal100:55,  prot100:3,  unit:"ml",   unitG:450},
+  {name:"Bibimbap végétarien",               cat:"Plats complets", cal100:140, prot100:6,  unit:"g",    unitG:400},
+  {name:"Curry massaman légumes",             cat:"Plats complets", cal100:125, prot100:3,  unit:"g",    unitG:350},
+  {name:"Tom kha gai végétarien",             cat:"Plats complets", cal100:90,  prot100:3,  unit:"ml",   unitG:350},
+  {name:"Agedashi tofu",                      cat:"Plats complets", cal100:110, prot100:7,  unit:"g",    unitG:200},
+  {name:"Miso soup champignons tofu",         cat:"Plats complets", cal100:40,  prot100:3,  unit:"ml",   unitG:300},
+  {name:"Curry japonais végétarien",          cat:"Plats complets", cal100:140, prot100:4,  unit:"g",    unitG:400},
+  {name:"Okonomiyaki végétarien",             cat:"Plats complets", cal100:165, prot100:6,  unit:"g",    unitG:200},
+  // CUISINE INDIENNE
+  {name:"Dal makhani végétarien",             cat:"Plats complets", cal100:120, prot100:6,  unit:"g",    unitG:300},
+  {name:"Dal tadka lentilles jaunes",         cat:"Plats complets", cal100:105, prot100:6,  unit:"g",    unitG:300},
+  {name:"Palak paneer (épinards fromage)",    cat:"Plats complets", cal100:145, prot100:7,  unit:"g",    unitG:300},
+  {name:"Chana masala",                       cat:"Plats complets", cal100:130, prot100:6,  unit:"g",    unitG:300},
+  {name:"Aloo gobi (pomme de terre chou-fl)", cat:"Plats complets", cal100:95,  prot100:3,  unit:"g",    unitG:300},
+  {name:"Saag aloo (épinards pomme de terre)",cat:"Plats complets", cal100:100, prot100:3,  unit:"g",    unitG:300},
+  {name:"Raita au concombre",                 cat:"Plats complets", cal100:55,  prot100:3,  unit:"g",    unitG:150},
+  {name:"Samosas légumes (2)",               cat:"Plats complets", cal100:250, prot100:5,  unit:"unité",unitG:70},
+  {name:"Khichdi riz lentilles",              cat:"Plats complets", cal100:115, prot100:5,  unit:"g",    unitG:300},
+  {name:"Baingan bharta (aubergine fumée)",   cat:"Plats complets", cal100:80,  prot100:2,  unit:"g",    unitG:250},
+  {name:"Matar paneer",                       cat:"Plats complets", cal100:155, prot100:8,  unit:"g",    unitG:300},
+  // CUISINE MEXICAINE
+  {name:"Tacos haricots noirs avocat (2)",    cat:"Plats complets", cal100:220, prot100:7,  unit:"unité",unitG:120},
+  {name:"Tacos champignons grillés (2)",      cat:"Plats complets", cal100:185, prot100:5,  unit:"unité",unitG:110},
+  {name:"Quesadilla légumes fromage",         cat:"Plats complets", cal100:235, prot100:9,  unit:"g",    unitG:200},
+  {name:"Nachos haricots guacamole",          cat:"Plats complets", cal100:280, prot100:7,  unit:"g",    unitG:200},
+  {name:"Enchiladas végétariennes",           cat:"Plats complets", cal100:195, prot100:7,  unit:"g",    unitG:250},
+  {name:"Fajitas légumes poivrons",           cat:"Plats complets", cal100:155, prot100:5,  unit:"g",    unitG:250},
+  {name:"Bol mexicain riz haricots",          cat:"Plats complets", cal100:145, prot100:6,  unit:"g",    unitG:350},
+  {name:"Guacamole tortillas",               cat:"Plats complets", cal100:200, prot100:3,  unit:"g",    unitG:150},
+  {name:"Soupe tortilla végétarienne",        cat:"Plats complets", cal100:85,  prot100:4,  unit:"ml",   unitG:350},
+  // CUISINE MOYEN-ORIENT & MÉDITERRANÉEN
+  {name:"Houmous pain pita légumes",          cat:"Plats complets", cal100:180, prot100:7,  unit:"g",    unitG:250},
+  {name:"Baba ganoush pain pita",             cat:"Plats complets", cal100:155, prot100:4,  unit:"g",    unitG:200},
+  {name:"Mezze végétarien complet",           cat:"Plats complets", cal100:165, prot100:6,  unit:"g",    unitG:300},
+  {name:"Shakshuka épinards feta",            cat:"Plats complets", cal100:110, prot100:8,  unit:"g",    unitG:300},
+  {name:"Fatayer épinards (2)",              cat:"Plats complets", cal100:220, prot100:6,  unit:"unité",unitG:80},
+  {name:"Mujaddara (riz lentilles oignons)",  cat:"Plats complets", cal100:130, prot100:5,  unit:"g",    unitG:300},
+  {name:"Fatteh pois chiches yaourt",         cat:"Plats complets", cal100:175, prot100:7,  unit:"g",    unitG:300},
+  {name:"Borek épinards feta",               cat:"Plats complets", cal100:245, prot100:8,  unit:"g",    unitG:150},
+  {name:"Dolmades végétariens (6)",           cat:"Plats complets", cal100:165, prot100:3,  unit:"unité",unitG:40},
+  {name:"Spanakopita (part)",                cat:"Plats complets", cal100:230, prot100:7,  unit:"part", unitG:120},
+  {name:"Moussaka aubergines lentilles",      cat:"Plats complets", cal100:140, prot100:7,  unit:"g",    unitG:300},
+  {name:"Gigantes plaki (haricots blancs tomate)", cat:"Plats complets", cal100:120, prot100:6, unit:"g", unitG:250},
+  // CUISINE FRANÇAISE
+  {name:"Soupe à l'oignon gratinée",          cat:"Plats complets", cal100:90,  prot100:4,  unit:"ml",   unitG:350},
+  {name:"Vichyssoise (poireau pomme de terre)",cat:"Plats complets", cal100:75,  prot100:2,  unit:"ml",   unitG:300},
+  {name:"Gratin de blettes fromage",          cat:"Plats complets", cal100:120, prot100:5,  unit:"g",    unitG:300},
+  {name:"Tarte flambée végétarienne",         cat:"Plats complets", cal100:240, prot100:8,  unit:"part", unitG:150},
+  {name:"Croque monsieur végétarien",         cat:"Plats complets", cal100:285, prot100:14, unit:"unité",unitG:160},
+  {name:"Soufflé au fromage",                cat:"Plats complets", cal100:175, prot100:10, unit:"g",    unitG:200},
+  {name:"Gougères fromage (4)",              cat:"Plats complets", cal100:310, prot100:9,  unit:"unité",unitG:25},
+  {name:"Flamiche poireau",                  cat:"Plats complets", cal100:235, prot100:7,  unit:"part", unitG:130},
+  {name:"Brandade de légumes",               cat:"Plats complets", cal100:120, prot100:4,  unit:"g",    unitG:250},
+  {name:"Potée végétarienne",                cat:"Plats complets", cal100:90,  prot100:4,  unit:"g",    unitG:350},
+  // CUISINE DU MONDE (divers)
+  {name:"Feijoada végétarienne brésilienne",  cat:"Plats complets", cal100:130, prot100:6,  unit:"g",    unitG:350},
+  {name:"Arepa maïs haricots",              cat:"Plats complets", cal100:210, prot100:6,  unit:"unité",unitG:120},
+  {name:"Empanadas légumes (2)",             cat:"Plats complets", cal100:235, prot100:5,  unit:"unité",unitG:90},
+  {name:"Injera légumes éthiopien",          cat:"Plats complets", cal100:110, prot100:4,  unit:"g",    unitG:350},
+  {name:"Shakshuka marocaine",               cat:"Plats complets", cal100:105, prot100:7,  unit:"g",    unitG:300},
+  {name:"Mafe végétarien (ragoût arachide)", cat:"Plats complets", cal100:150, prot100:5,  unit:"g",    unitG:300},
+  {name:"Ful medames (fèves épicées)",       cat:"Plats complets", cal100:115, prot100:7,  unit:"g",    unitG:250},
+  {name:"Shakshuka tunisienne harissa",      cat:"Plats complets", cal100:110, prot100:7,  unit:"g",    unitG:300},
+  {name:"Koshari égyptien",                 cat:"Plats complets", cal100:135, prot100:5,  unit:"g",    unitG:350},
+  // PLATS RÉCONFORTANTS
+  {name:"Mac and cheese végétarien",         cat:"Plats complets", cal100:225, prot100:9,  unit:"g",    unitG:300},
+  {name:"Gratin de pâtes légumes",           cat:"Plats complets", cal100:185, prot100:8,  unit:"g",    unitG:300},
+  {name:"Purée potimarron",                 cat:"Plats complets", cal100:75,  prot100:2,  unit:"g",    unitG:250},
+  {name:"Soupe butternut noix de coco",      cat:"Plats complets", cal100:85,  prot100:2,  unit:"ml",   unitG:350},
+  {name:"Soupe tomate basilic",              cat:"Plats complets", cal100:55,  prot100:2,  unit:"ml",   unitG:350},
+  {name:"Crème de champignons",              cat:"Plats complets", cal100:70,  prot100:2,  unit:"ml",   unitG:300},
+  {name:"Soupe brocoli cheddar",             cat:"Plats complets", cal100:95,  prot100:5,  unit:"ml",   unitG:300},
+  {name:"Soupe épinards lentilles",          cat:"Plats complets", cal100:80,  prot100:5,  unit:"ml",   unitG:350},
+  {name:"Chili végétarien haricots 3 types", cat:"Plats complets", cal100:115, prot100:6,  unit:"g",    unitG:350},
+  {name:"Cassoulet végétarien",              cat:"Plats complets", cal100:135, prot100:7,  unit:"g",    unitG:350},
+  {name:"Hachis parmentier légumes",         cat:"Plats complets", cal100:115, prot100:4,  unit:"g",    unitG:300},
+  {name:"Shepherd's pie végétarien",         cat:"Plats complets", cal100:125, prot100:5,  unit:"g",    unitG:300},
+  // SANDWICHS & WRAPS
+  {name:"Wrap falafel houmous légumes",      cat:"Plats complets", cal100:205, prot100:7,  unit:"unité",unitG:220},
+  {name:"Wrap avocat œuf dur",              cat:"Plats complets", cal100:225, prot100:9,  unit:"unité",unitG:200},
+  {name:"Sandwich caprese mozzarella",       cat:"Plats complets", cal100:245, prot100:10, unit:"unité",unitG:200},
+  {name:"Sandwich houmous légumes grillés",  cat:"Plats complets", cal100:215, prot100:7,  unit:"unité",unitG:210},
+  {name:"Bagel cream cheese concombre",      cat:"Plats complets", cal100:265, prot100:9,  unit:"unité",unitG:180},
+  {name:"Club sandwich végétarien",          cat:"Plats complets", cal100:280, prot100:11, unit:"unité",unitG:230},
+  {name:"Panini fromage légumes",            cat:"Plats complets", cal100:255, prot100:10, unit:"unité",unitG:180},
+  {name:"Pita falafel salade",              cat:"Plats complets", cal100:230, prot100:8,  unit:"unité",unitG:200},
+  // COLLATIONS & SNACKS SALÉS
+  {name:"Soupe miso instantanée",            cat:"Plats complets", cal100:25,  prot100:2,  unit:"ml",   unitG:250},
+  {name:"Edamame sel (100g)",               cat:"Plats complets", cal100:122, prot100:11, unit:"g",    unitG:100},
+  {name:"Chips légumes maison",              cat:"Plats complets", cal100:180, prot100:3,  unit:"g",    unitG:50},
+  {name:"Toast fromage blanc ciboulette",    cat:"Plats complets", cal100:135, prot100:8,  unit:"g",    unitG:120},
+  {name:"Verrines avocat crevettes veg",     cat:"Plats complets", cal100:110, prot100:3,  unit:"g",    unitG:100},
+  {name:"Carottes houmous (portion)",       cat:"Plats complets", cal100:95,  prot100:4,  unit:"g",    unitG:150},
+  {name:"Concombre tzatziki",               cat:"Plats complets", cal100:55,  prot100:2,  unit:"g",    unitG:150},
+  {name:"Caponata sicilienne",              cat:"Plats complets", cal100:90,  prot100:2, unit:"g",   unitG:200},
+
+  // ── SANDWICHS SUPPLÉMENTAIRES ──
+  {name:"Sandwich mozzarella tomates pesto",  cat:"Plats complets", cal100:240, prot100:10, unit:"unité", unitG:210},
+  {name:"Sandwich chèvre miel noix",          cat:"Plats complets", cal100:295, prot100:10, unit:"unité", unitG:190},
+  {name:"Sandwich brie roquette",             cat:"Plats complets", cal100:280, prot100:11, unit:"unité", unitG:190},
+  {name:"Sandwich avocat feta épinards",      cat:"Plats complets", cal100:255, prot100:9,  unit:"unité", unitG:200},
+  {name:"Sandwich œuf mayo cress",            cat:"Plats complets", cal100:270, prot100:10, unit:"unité", unitG:185},
+  {name:"Sandwich ricotta tomates séchées",   cat:"Plats complets", cal100:260, prot100:9,  unit:"unité", unitG:190},
+  {name:"Sandwich tapenade légumes grillés",  cat:"Plats complets", cal100:230, prot100:7,  unit:"unité", unitG:195},
+  {name:"Bagel saumon végétarien (tofu fumé)",cat:"Plats complets", cal100:275, prot100:12, unit:"unité", unitG:190},
+  {name:"Wrap chèvre betterave noix",         cat:"Plats complets", cal100:240, prot100:8,  unit:"unité", unitG:210},
+  {name:"Panini mozzarella pesto tomates",    cat:"Plats complets", cal100:265, prot100:10, unit:"unité", unitG:185},
+  {name:"Toast nordique avocat fromage frais",cat:"Plats complets", cal100:210, prot100:7,  unit:"g",     unitG:160},
+  {name:"Bruschetta mozzarella basilic",      cat:"Plats complets", cal100:195, prot100:8,  unit:"unité", unitG:120},
+  {name:"Tartine chèvre tomates herbes",      cat:"Plats complets", cal100:185, prot100:8,  unit:"g",     unitG:130},
+  {name:"Croque végétarien épinards béchamel",cat:"Plats complets", cal100:270, prot100:12, unit:"unité", unitG:170},
+
+  // ── SUCRERIES & GÂTEAUX ──
+  {name:"Kinder Bueno (1 barre)",             cat:"Sucreries",      cal100:541, prot100:7,  unit:"unité", unitG:43},
+  {name:"Kinder Bueno White (1 barre)",       cat:"Sucreries",      cal100:566, prot100:6,  unit:"unité", unitG:39},
+  {name:"Kinder Surprise",                    cat:"Sucreries",      cal100:519, prot100:7,  unit:"unité", unitG:20},
+  {name:"Kinder Chocolat (2 barres)",         cat:"Sucreries",      cal100:549, prot100:8,  unit:"unité", unitG:25},
+  {name:"Mars (1 barre)",                     cat:"Sucreries",      cal100:452, prot100:4,  unit:"unité", unitG:51},
+  {name:"Snickers (1 barre)",                 cat:"Sucreries",      cal100:488, prot100:8,  unit:"unité", unitG:50},
+  {name:"Twix (1 barre)",                     cat:"Sucreries",      cal100:495, prot100:4,  unit:"unité", unitG:50},
+  {name:"Kit Kat (2 barres)",                 cat:"Sucreries",      cal100:518, prot100:7,  unit:"unité", unitG:41},
+  {name:"Bounty (1 barre)",                   cat:"Sucreries",      cal100:469, prot100:3,  unit:"unité", unitG:57},
+  {name:"Milka tablette (carré, 3 carrés)",   cat:"Sucreries",      cal100:530, prot100:7,  unit:"g",     unitG:30},
+  {name:"Nutella",                            cat:"Sucreries",      cal100:530, prot100:6,  unit:"c. à soupe", unitG:20},
+  {name:"Spéculoos (2 biscuits)",             cat:"Sucreries",      cal100:485, prot100:6,  unit:"unité", unitG:16},
+  {name:"Oréo (3 biscuits)",                 cat:"Sucreries",      cal100:473, prot100:5,  unit:"unité", unitG:12},
+  {name:"Biscuit sablé (1)",                 cat:"Sucreries",      cal100:490, prot100:5,  unit:"unité", unitG:15},
+  {name:"Petit Lu (4 biscuits)",              cat:"Sucreries",      cal100:432, prot100:6,  unit:"unité", unitG:10},
+  {name:"BN chocolat (2 biscuits)",           cat:"Sucreries",      cal100:430, prot100:5,  unit:"unité", unitG:20},
+  {name:"Gâteau au yaourt (part)",            cat:"Sucreries",      cal100:320, prot100:5,  unit:"part",  unitG:80},
+  {name:"Brownie chocolat (part)",            cat:"Sucreries",      cal100:415, prot100:5,  unit:"part",  unitG:60},
+  {name:"Muffin chocolat",                    cat:"Sucreries",      cal100:380, prot100:5,  unit:"unité", unitG:80},
+  {name:"Fondant au chocolat (part)",         cat:"Sucreries",      cal100:400, prot100:6,  unit:"part",  unitG:80},
+  {name:"Tarte aux pommes (part)",            cat:"Sucreries",      cal100:230, prot100:3,  unit:"part",  unitG:120},
+  {name:"Tarte au citron meringuée (part)",   cat:"Sucreries",      cal100:290, prot100:4,  unit:"part",  unitG:110},
+  {name:"Éclair au chocolat",                cat:"Sucreries",      cal100:310, prot100:6,  unit:"unité", unitG:80},
+  {name:"Paris-Brest (part)",                cat:"Sucreries",      cal100:380, prot100:6,  unit:"part",  unitG:100},
+  {name:"Macaron (1)",                       cat:"Sucreries",      cal100:410, prot100:4,  unit:"unité", unitG:18},
+  {name:"Financier",                         cat:"Sucreries",      cal100:430, prot100:7,  unit:"unité", unitG:30},
+  {name:"Madeleine (1)",                     cat:"Sucreries",      cal100:400, prot100:6,  unit:"unité", unitG:25},
+  {name:"Canelé bordelais",                  cat:"Sucreries",      cal100:335, prot100:5,  unit:"unité", unitG:40},
+  {name:"Kouign-amann (part)",               cat:"Sucreries",      cal100:380, prot100:4,  unit:"part",  unitG:80},
+  {name:"Gaufre nature",                     cat:"Sucreries",      cal100:320, prot100:7,  unit:"unité", unitG:75},
+  {name:"Crêpe sucrée (beurre sucre)",       cat:"Sucreries",      cal100:220, prot100:5,  unit:"unité", unitG:80},
+  {name:"Beignet confiture",                 cat:"Sucreries",      cal100:320, prot100:5,  unit:"unité", unitG:70},
+  {name:"Cheesecake (part)",                 cat:"Sucreries",      cal100:320, prot100:6,  unit:"part",  unitG:120},
+  {name:"Tiramisu (portion)",                cat:"Sucreries",      cal100:290, prot100:5,  unit:"g",     unitG:150},
+  {name:"Panna cotta (portion)",             cat:"Sucreries",      cal100:185, prot100:3,  unit:"g",     unitG:120},
+  {name:"Mousse au chocolat maison",         cat:"Sucreries",      cal100:210, prot100:5,  unit:"g",     unitG:100},
+  {name:"Île flottante",                     cat:"Sucreries",      cal100:130, prot100:5,  unit:"g",     unitG:150},
+  {name:"Crème brûlée",                      cat:"Sucreries",      cal100:195, prot100:3,  unit:"g",     unitG:120},
+  {name:"Yaourt sucré aux fruits",           cat:"Sucreries",      cal100:95,  prot100:4,  unit:"g",     unitG:125},
+  {name:"Glace vanille (boule)",             cat:"Sucreries",      cal100:207, prot100:3,  unit:"unité", unitG:60},
+  {name:"Glace chocolat (boule)",            cat:"Sucreries",      cal100:216, prot100:4,  unit:"unité", unitG:60},
+  {name:"Sorbet citron (boule)",             cat:"Sucreries",      cal100:130, prot100:1,  unit:"unité", unitG:60},
+  {name:"Esquimau chocolat",                 cat:"Sucreries",      cal100:285, prot100:3,  unit:"unité", unitG:73},
+  {name:"Chewing-gum (1 dragée)",            cat:"Sucreries",      cal100:150, prot100:0,  unit:"unité", unitG:2},
+  {name:"Bonbons Haribo (portion)",          cat:"Sucreries",      cal100:340, prot100:4,  unit:"g",     unitG:30},
+  {name:"Caramels (3 pièces)",               cat:"Sucreries",      cal100:400, prot100:2,  unit:"unité", unitG:10},
+  {name:"Guimauves (3 pièces)",              cat:"Sucreries",      cal100:318, prot100:2,  unit:"unité", unitG:10},
+
+  // ── PROTÉINES VÉGÉTALES SUPPLÉMENTAIRES ──
+  // Poudres & isolats
+  {name:"Protéine pois isolat (poudre)",      cat:"Protéines végétales", cal100:385, prot100:82, unit:"g", unitG:30},
+  {name:"Protéine pois concentrat (poudre)",  cat:"Protéines végétales", cal100:370, prot100:75, unit:"g", unitG:30},
+  {name:"Protéine soja isolat (poudre)",      cat:"Protéines végétales", cal100:370, prot100:90, unit:"g", unitG:30},
+  {name:"Protéine tournesol (poudre)",        cat:"Protéines végétales", cal100:350, prot100:55, unit:"g", unitG:30},
+  {name:"Protéine riz brun (poudre)",         cat:"Protéines végétales", cal100:360, prot100:70, unit:"g", unitG:30},
+  {name:"Protéine chanvre (poudre)",          cat:"Protéines végétales", cal100:360, prot100:50, unit:"g", unitG:30},
+  {name:"Protéine fève (poudre)",             cat:"Protéines végétales", cal100:350, prot100:65, unit:"g", unitG:30},
+  {name:"Protéine quinoa (poudre)",           cat:"Protéines végétales", cal100:365, prot100:60, unit:"g", unitG:30},
+  {name:"Blend pois+riz (poudre)",            cat:"Protéines végétales", cal100:375, prot100:75, unit:"g", unitG:30},
+  {name:"Blend pois+chanvre (poudre)",        cat:"Protéines végétales", cal100:355, prot100:60, unit:"g", unitG:30},
+  // PVT & textured proteins
+  {name:"PVT soja fine sèche",                cat:"Protéines végétales", cal100:348, prot100:52, unit:"g", unitG:50},
+  {name:"PVT soja grosse sèche",              cat:"Protéines végétales", cal100:348, prot100:52, unit:"g", unitG:60},
+  {name:"PVT soja fine réhydratée",           cat:"Protéines végétales", cal100:100, prot100:15, unit:"g", unitG:150},
+  {name:"PVT soja grosse réhydratée",         cat:"Protéines végétales", cal100:100, prot100:15, unit:"g", unitG:180},
+  {name:"PVT pois chiches sèche",             cat:"Protéines végétales", cal100:355, prot100:50, unit:"g", unitG:50},
+  {name:"PVT pois chiches réhydratée",        cat:"Protéines végétales", cal100:105, prot100:14, unit:"g", unitG:150},
+  {name:"PVT lentilles sèche",               cat:"Protéines végétales", cal100:340, prot100:48, unit:"g", unitG:50},
+  {name:"PVT lentilles réhydratée",          cat:"Protéines végétales", cal100:98,  prot100:14, unit:"g", unitG:150},
+  {name:"PVT tournesol sèche",               cat:"Protéines végétales", cal100:330, prot100:45, unit:"g", unitG:50},
+  {name:"PVT tournesol réhydratée",          cat:"Protéines végétales", cal100:95,  prot100:13, unit:"g", unitG:150},
+  // Autres sources
+  {name:"Lupin graines cuites",              cat:"Protéines végétales", cal100:119, prot100:16, unit:"g", unitG:100},
+  {name:"Farine de lupin",                   cat:"Protéines végétales", cal100:370, prot100:42, unit:"g", unitG:30},
+  {name:"Spiruline poudre",                  cat:"Protéines végétales", cal100:290, prot100:57, unit:"c. à soupe", unitG:10},
+  {name:"Spiruline comprimés (5g)",          cat:"Protéines végétales", cal100:290, prot100:57, unit:"g", unitG:5},
+  {name:"Chlorella poudre",                  cat:"Protéines végétales", cal100:290, prot100:58, unit:"c. à café", unitG:5},
+  {name:"Levure de bière en paillettes",     cat:"Protéines végétales", cal100:325, prot100:45, unit:"g", unitG:15},
+  {name:"Tofu lactofermenté",                cat:"Protéines végétales", cal100:95,  prot100:17, unit:"g", unitG:100},
+  {name:"Natto (soja fermenté)",             cat:"Protéines végétales", cal100:212, prot100:18, unit:"g", unitG:100},
+  {name:"Miso rouge",                        cat:"Protéines végétales", cal100:210, prot100:13, unit:"g", unitG:20},
+  {name:"Okara (résidu soja)",               cat:"Protéines végétales", cal100:77,  prot100:7,  unit:"g", unitG:100},
+  {name:"Farine de pois chiches",            cat:"Protéines végétales", cal100:387, prot100:22, unit:"g", unitG:50},
+  {name:"Farine de lentilles",               cat:"Protéines végétales", cal100:353, prot100:26, unit:"g", unitG:50},
+  {name:"Farine de soja complète",           cat:"Protéines végétales", cal100:372, prot100:35, unit:"g", unitG:50},
+  {name:"Haricots de soja cuits (edamame)",  cat:"Protéines végétales", cal100:122, prot100:11, unit:"g", unitG:150},
+  {name:"Lait de soja enrichi protéines",    cat:"Protéines végétales", cal100:50,  prot100:5,  unit:"ml", unitG:250},
+
+  // ── PLATS BOLOGNAISE & SAUCES VÉGÉTALES ──
+  {name:"Bolognaise PVT soja maison",        cat:"Plats complets", cal100:110, prot100:9,  unit:"g",  unitG:300},
+  {name:"Bolognaise lentilles maison",       cat:"Plats complets", cal100:105, prot100:7,  unit:"g",  unitG:300},
+  {name:"Bolognaise pois chiches maison",    cat:"Plats complets", cal100:108, prot100:6,  unit:"g",  unitG:300},
+  {name:"Bolognaise PVT du commerce",        cat:"Plats complets", cal100:90,  prot100:8,  unit:"g",  unitG:200},
+  {name:"Pâtes bolognaise PVT",              cat:"Plats complets", cal100:145, prot100:8,  unit:"g",  unitG:350},
+  {name:"Pâtes bolognaise lentilles",        cat:"Plats complets", cal100:140, prot100:7,  unit:"g",  unitG:350},
+  {name:"Lasagnes bolognaise PVT",           cat:"Plats complets", cal100:140, prot100:8,  unit:"g",  unitG:300},
+  {name:"Hachis parmentier PVT",             cat:"Plats complets", cal100:120, prot100:7,  unit:"g",  unitG:300},
+  {name:"Sauce tomate PVT (jar)",            cat:"Graisses & Sauces", cal100:75, prot100:6, unit:"g",  unitG:150},
+  {name:"Steak haché végétal (soja/pois)",   cat:"Protéines végétales", cal100:175, prot100:18, unit:"unité", unitG:100},
+  {name:"Saucisse végétale",                 cat:"Protéines végétales", cal100:195, prot100:15, unit:"unité", unitG:70},
+  {name:"Nuggets végétaux (4 pièces)",       cat:"Protéines végétales", cal100:215, prot100:12, unit:"unité", unitG:60},
+  {name:"Escalope de seitan panée",          cat:"Protéines végétales", cal100:200, prot100:18, unit:"unité", unitG:100},
+  {name:"Merguez végétale",                  cat:"Protéines végétales", cal100:185, prot100:14, unit:"unité", unitG:70},
+  {name:"Lardons végétaux (fumés)",          cat:"Protéines végétales", cal100:155, prot100:16, unit:"g",     unitG:50},
+  // BOISSONS supplémentaires
+  {name:"Coca-Cola Zéro",                  cat:"Boissons", cal100:0,  prot100:0, unit:"ml",         unitG:330},
+  {name:"Pepsi Max",                       cat:"Boissons", cal100:0,  prot100:0, unit:"ml",         unitG:330},
+  {name:"Limonade sans sucre",             cat:"Boissons", cal100:2,  prot100:0, unit:"ml",         unitG:330},
+];
+
+const FOOD_CATS = ["Tout", ...Array.from(new Set(FOOD_DB.map(f => f.cat)))];
+const TARGETS    = { cal: 2150, prot: 170 };
+const CAL_SPORT  = { course: 300, calistenie: 200, repos: 0 };
+const MEALS      = ["petit-déjeuner","déjeuner","dîner","collation"];
+const RESSENTI   = ["","😓","😐","🙂","💪","🔥"];
+
+function todayKey() { return new Date().toISOString().split("T")[0]; }
+
+function getWeekDates(offset = 0) {
+  const now = new Date();
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - ((now.getDay() + 6) % 7) + offset * 7);
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    return d.toISOString().split("T")[0];
+  });
+}
+
+// ─── CLÉS DE STOCKAGE PERMANENTES (ne jamais changer) ───────────────────────
+const STORAGE_KEYS = {
+  sessions:    "sport_sessions",
+  foods:       "sport_foods",
+  perf:        "sport_perf",
+  poidsHist:   "sport_poids_hist",
+  favRepas:    "sport_fav_repas",
+  weekProgram: "sport_week_program", // prefix — clé complète = sport_week_program_YYYY-Wnn
+};
+
+// Clé unique par semaine calendaire
+function weekKey(dateStr) {
+  const d = new Date(dateStr + "T12:00:00");
+  const jan1 = new Date(d.getFullYear(), 0, 1);
+  const weekNum = Math.ceil(((d - jan1) / 86400000 + jan1.getDay() + 1) / 7);
+  return `${STORAGE_KEYS.weekProgram}_${d.getFullYear()}-W${String(weekNum).padStart(2,"0")}`;
+}
+
+// Programme par défaut (7 jours, index 0=lundi)
+const DEFAULT_WEEK_PLAN = [
+  { type:"calistenie", label:"Calisthénie", detail:"Bloc A + B", icon:"◈", color:"#d4a843" },
+  { type:"course",     label:"Course EF",   detail:"45 min · 7:00-7:30/km", icon:"◎", color:"#4a9fd4" },
+  { type:"repos",      label:"Repos",       detail:"Récupération active", icon:"◇", color:"#5db866" },
+  { type:"calistenie", label:"Calisthénie", detail:"Bloc B + C", icon:"◈", color:"#d4a843" },
+  { type:"course",     label:"Fractionné",  detail:"30 min · intensité", icon:"◉", color:"#7a8fd4" },
+  { type:"calistenie", label:"Calisthénie", detail:"Bloc A + C", icon:"◈", color:"#d4a843" },
+  { type:"course",     label:"Course EF longue", detail:"55 min · 7:00-7:30/km", icon:"◎", color:"#4a9fd4" },
+];
+
+// Toutes les options de séance disponibles dans le sélecteur
+const SEANCE_OPTIONS = [
+  { type:"course",     label:"Course EF",      detail:"Zone 2 · 7:00-7:30/km", icon:"◎", color:"#4a9fd4" },
+  { type:"course",     label:"Fractionné",     detail:"Intensité · 30 min",     icon:"◉", color:"#7a8fd4" },
+  { type:"course",     label:"Course longue",  detail:"EF · 60+ min",           icon:"◎", color:"#4a9fd4" },
+  { type:"calistenie", label:"Calisthénie A+B",detail:"Gainage + Tractions",    icon:"◈", color:"#d4a843" },
+  { type:"calistenie", label:"Calisthénie B+C",detail:"Tractions + Dips",       icon:"◈", color:"#d4a843" },
+  { type:"calistenie", label:"Calisthénie A+C",detail:"Gainage + Dips",         icon:"◈", color:"#d4a843" },
+  { type:"calistenie", label:"Calisthénie libre",detail:"Séance au choix",       icon:"◈", color:"#d4a843" },
+  { type:"marche",     label:"Marche",          detail:"Récup active",           icon:"◇", color:"#5db866" },
+  { type:"velo",       label:"Vélo",            detail:"Cardio doux",            icon:"○", color:"#5db866" },
+  { type:"repos",      label:"Repos",           detail:"Récupération",           icon:"◇", color:"#5db866" },
+  { type:"libre",      label:"Libre",           detail:"Non défini",             icon:"·", color:"#777" },
+];
+
+// Migration automatique depuis les anciennes clés vers les clés permanentes
+async function migrateStorage() {
+  const oldKeys = [
+    {old:"sess_v4_gs",       new:STORAGE_KEYS.sessions},
+    {old:"sess_v4",          new:STORAGE_KEYS.sessions},
+    {old:"food_v4_gs",       new:STORAGE_KEYS.foods},
+    {old:"food_v4",          new:STORAGE_KEYS.foods},
+    {old:"perf_v4_gs",       new:STORAGE_KEYS.perf},
+    {old:"perf_v4",          new:STORAGE_KEYS.perf},
+    {old:"poids_hist_v1",    new:STORAGE_KEYS.poidsHist},
+    {old:"fav_repas_v1",     new:STORAGE_KEYS.favRepas},
+  ];
+  for (const {old, new: newKey} of oldKeys) {
+    try {
+      // Vérifie si la nouvelle clé existe déjà
+      const existing = await window.storage.get(newKey);
+      if (existing?.value) continue; // déjà migré
+      // Cherche l'ancienne clé
+      const oldData = await window.storage.get(old);
+      if (oldData?.value) {
+        await window.storage.set(newKey, oldData.value);
+        console.log(`Migré: ${old} → ${newKey}`);
+      }
+    } catch {}
+  }
+}
+
+function useStorage(key, def) {
+  const [val, setVal] = useState(def);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    (async () => {
+      try { const r = await window.storage.get(key); if (r?.value) setVal(JSON.parse(r.value)); }
+      catch {}
+      setReady(true);
+    })();
+  }, [key]);
+  const save = useCallback(async (v) => {
+    setVal(v);
+    try { await window.storage.set(key, JSON.stringify(v)); } catch {}
+  }, [key]);
+  return [val, save, ready];
+}
+
+// ─── RECHERCHE FLOUE (normalisation accents + Levenshtein) ───────────────────
+function normalise(str) {
+  return str.toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // supprime accents
+    .replace(/[œ]/g,"oe").replace(/[æ]/g,"ae")
+    .replace(/['']/g,"'");
+}
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({length:m+1},(_,i)=>Array.from({length:n+1},(_,j)=>i===0?j:j===0?i:0));
+  for (let i=1;i<=m;i++) for (let j=1;j<=n;j++)
+    dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1+Math.min(dp[i-1][j],dp[i][j-1],dp[i-1][j-1]);
+  return dp[m][n];
+}
+
+function fuzzySearch(query, items, catFilter) {
+  if (!query && catFilter === "Tout") return items.slice(0, 12);
+  const q = normalise(query);
+  const filtered = catFilter !== "Tout" ? items.filter(f=>f.cat===catFilter) : items;
+  if (!q) return filtered.slice(0, 12);
+
+  return filtered
+    .map(f => {
+      const name = normalise(f.name);
+      // Score : 0=exact, 1=commence par, 2=contient, 3+=distance Levenshtein
+      let score;
+      if (name === q) score = 0;
+      else if (name.startsWith(q)) score = 1;
+      else if (name.includes(q)) score = 2;
+      else {
+        // Vérifie si un mot du nom contient la requête
+        const words = name.split(/[\s,()-]+/);
+        const wordMatch = words.some(w => w.includes(q) || q.includes(w) && w.length > 2);
+        if (wordMatch) score = 3;
+        else {
+          // Levenshtein sur le nom complet (pour tolérer les fautes de frappe)
+          const dist = levenshtein(q, name.slice(0, q.length + 3));
+          score = dist <= 2 ? 4 + dist : 99;
+        }
+      }
+      return {f, score};
+    })
+    .filter(({score}) => score < 99)
+    .sort((a,b) => a.score - b.score)
+    .slice(0, 12)
+    .map(({f}) => f);
+}
+
+// ─── VALIDATION ──────────────────────────────────────────────────────────────
+function validateNum(val, {min=0, max=9999, label=""}={}) {
+  const n = parseFloat(val);
+  if (val === "" || val === undefined) return null; // champ vide = ok
+  if (isNaN(n)) return `${label} doit être un nombre`;
+  if (n < min) return `${label} doit être ≥ ${min}`;
+  if (n > max) return `${label} doit être ≤ ${max}`;
+  return null;
+}
+
+function InputField({label, value, onChange, placeholder, type="number", step, min, max, validLabel, style={}}) {
+  const [touched, setTouched] = useState(false);
+  const err = touched ? validateNum(value, {min, max, label:validLabel||label}) : null;
+  return (
+    <div style={{marginBottom:"0"}}>
+      {label && <div style={S.label}>{label}</div>}
+      <input
+        value={value} type={type} step={step}
+        onChange={e=>{ onChange(e.target.value); }}
+        onBlur={()=>setTouched(true)}
+        placeholder={placeholder}
+        style={{...S.input, ...style, border:`1.5px solid ${err?C.red:C.border}`}}
+      />
+      {err && <div style={{fontSize:"10px",color:C.red,marginTop:"3px"}}>{err}</div>}
+    </div>
+  );
+}
+
+// ─── SHARED STYLES ───────────────────────────────────────────────────────────
+const S = {
+  card:    { background: C.card,    border: `1px solid ${C.border}`,      borderRadius: "8px" },
+  cardHi:  { background: C.cardHi,  border: `1px solid ${C.borderLight}`,  borderRadius: "8px" },
+  input:   { width: "100%", background: "#111", border: `1.5px solid ${C.border}`, color: C.text, padding: "10px 12px", borderRadius: "6px", fontSize: "14px", boxSizing: "border-box" },
+  label:   { fontSize: "10px", color: C.textMuted, display: "block", marginBottom: "6px", letterSpacing: "2px", textTransform: "uppercase", fontWeight: "600" },
+  navBtn:  { background: C.card, border: `1.5px solid ${C.border}`, color: C.textSub, padding: "7px 14px", cursor: "pointer", borderRadius: "6px", fontSize: "13px" },
+  tag:     (active) => ({ padding: "5px 11px", background: active ? C.gold : C.cardHi, border: `1.5px solid ${active ? C.gold : C.border}`, color: active ? "#111" : C.textSub, borderRadius: "20px", fontSize: "10px", cursor: "pointer", fontWeight: active ? "700" : "400" }),
+};
+
+function App() {
+  const [tab, setTab]   = useState("semaine");
+  const [wk, setWk]     = useState(0);
+  const [sessions, saveSessions, sReady] = useStorage(STORAGE_KEYS.sessions, {});
+  const [foods,    saveFoods,    fReady] = useStorage(STORAGE_KEYS.foods, {});
+  const [perf,     savePerf,     pReady] = useStorage(STORAGE_KEYS.perf, {tractions:"",dips:"",planche:"",poids:""});
+  const [poidsHist,savePoidsHist,phReady] = useStorage(STORAGE_KEYS.poidsHist, []);
+  const [favRepas, saveFavRepas, frReady] = useStorage(STORAGE_KEYS.favRepas, []);
+  const [notifOk,  setNotifOk]  = useState(false);
+  const [histRange,setHistRange] = useState(30);
+  const [sportManuel, setSportManuel] = useState("");
+  const [editDay, setEditDay] = useState(null); // {dateKey, dayIdx} — modal édition séance prévue
+  const [weekOverrides, setWeekOverrides] = useState({}); // {weekKey: {dayIdx: seanceOption}} // calories sport ajout manuel
+
+  const [sessModal, setSessModal]   = useState(null);
+  const [sessForm,  setSessForm]    = useState({duree:"",ressenti:"3",note:""});
+  const [foodModal, setFoodModal]   = useState(false);
+  const [movingFood, setMovingFood] = useState(null); // {id, currentMeal} — aliment en cours de déplacement
+  const [foodDate,  setFoodDate]    = useState(todayKey());
+  const [search,    setSearch]      = useState("");
+  const [catFilter, setCatFilter]   = useState("Tout");
+  const [picked,    setPicked]      = useState(null);
+  const [qty,       setQty]         = useState("");
+  const [meal,      setMeal]        = useState("déjeuner");
+  const [custom,    setCustom]      = useState({name:"",cal:"",prot:""});
+  const [mode,      setMode]        = useState("db");
+
+  const today     = todayKey();
+  const weekDates = getWeekDates(wk);
+
+  // Migration au premier chargement
+  useEffect(() => { migrateStorage(); }, []);
+
+  // Chargement des overrides de la semaine courante au changement de semaine
+  useEffect(() => {
+    (async () => {
+      const dates = getWeekDates(wk);
+      const key = weekKey(dates[0]);
+      try {
+        const r = await window.storage.get(key);
+        if (r?.value) setWeekOverrides(prev => ({...prev, [key]: JSON.parse(r.value)}));
+      } catch {}
+    })();
+  }, [wk]);
+
+  // Récupère le plan pour un jour donné (override ou défaut)
+  function getPlanForDate(dateStr) {
+    const dates = getWeekDates(wk);
+    const dayIdx = dates.indexOf(dateStr);
+    if (dayIdx === -1) {
+      // Autre semaine — cherche dans les overrides chargés
+      for (let w = -8; w <= 8; w++) {
+        const wd = getWeekDates(w);
+        const i = wd.indexOf(dateStr);
+        if (i !== -1) {
+          const wk2 = weekKey(wd[0]);
+          const ov = weekOverrides[wk2];
+          return (ov && ov[i]) ? ov[i] : DEFAULT_WEEK_PLAN[i];
+        }
+      }
+      return DEFAULT_WEEK_PLAN[0];
+    }
+    const wkKey = weekKey(dates[0]);
+    const ov = weekOverrides[wkKey];
+    return (ov && ov[dayIdx] !== undefined) ? ov[dayIdx] : DEFAULT_WEEK_PLAN[dayIdx];
+  }
+
+  // Sauvegarde un override pour un jour
+  async function saveDayOverride(dateStr, dayIdx, seance) {
+    const dates = getWeekDates(wk);
+    const wkKey = weekKey(dates[0]);
+    const current = weekOverrides[wkKey] || {};
+    const updated = {...current, [dayIdx]: seance};
+    setWeekOverrides(prev => ({...prev, [wkKey]: updated}));
+    try { await window.storage.set(wkKey, JSON.stringify(updated)); } catch {}
+    setEditDay(null);
+  }
+
+  // Réinitialise un jour au programme par défaut
+  async function resetDayOverride(dateStr, dayIdx) {
+    const dates = getWeekDates(wk);
+    const wkKey = weekKey(dates[0]);
+    const current = {...(weekOverrides[wkKey] || {})};
+    delete current[dayIdx];
+    setWeekOverrides(prev => ({...prev, [wkKey]: current}));
+    try { await window.storage.set(wkKey, JSON.stringify(current)); } catch {}
+    setEditDay(null);
+  }
+
+  // Stats de la semaine courante pour les indicateurs de rythme
+  function weekStats() {
+    const dates = getWeekDates(wk);
+    const doneDays = dates.filter(dk => sessions[dk]?.done && !sessions[dk]?.estRepos);
+    let courseCount = 0, caliCount = 0;
+    doneDays.forEach(dk => {
+      const acts = sessions[dk]?.activites || [];
+      if (acts.some(a => a === "course_ef" || a === "fractionne" || a === "course_longue")) courseCount++;
+      if (acts.some(a => a === "calistenie")) caliCount++;
+    });
+    // Séances prévues restantes cette semaine
+    const today2 = todayKey();
+    const remainingDays = dates.filter(dk => dk >= today2);
+    const plannedCourse = remainingDays.filter(dk => {
+      const p = getPlanForDate(dk);
+      return p.type === "course";
+    }).length;
+    const plannedCali = remainingDays.filter(dk => {
+      const p = getPlanForDate(dk);
+      return p.type === "calistenie";
+    }).length;
+    return { courseCount, caliCount, plannedCourse, plannedCali, doneDays: doneDays.length };
+  }
+
+  // ── Notifications ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "granted") setNotifOk(true);
+  }, []);
+
+  async function requestNotif() {
+    if (!("Notification" in window)) { alert("Notifications non supportées sur ce navigateur."); return; }
+    const perm = await Notification.requestPermission();
+    if (perm === "granted") {
+      setNotifOk(true);
+      scheduleNotifs();
+      new Notification("Dashboard Sport", { body: "✅ Notifications activées ! Tu recevras des rappels quotidiens.", icon: "" });
+    }
+  }
+
+  function scheduleNotifs() {
+    // Rappel séance 18h, rappel repas 20h — via setTimeout jusqu'à la prochaine occurrence
+    const now = new Date();
+    function msUntil(h, m) {
+      const t = new Date(); t.setHours(h, m, 0, 0);
+      if (t <= now) t.setDate(t.getDate() + 1);
+      return t - now;
+    }
+    setTimeout(() => {
+      if (Notification.permission === "granted") {
+        new Notification("💪 Dashboard Sport", { body: "Tu as loggé ta séance aujourd'hui ?" });
+      }
+    }, msUntil(18, 0));
+    setTimeout(() => {
+      if (Notification.permission === "granted") {
+        new Notification("🍽 Dashboard Sport", { body: "N'oublie pas de logger tes repas du soir !" });
+      }
+    }, msUntil(20, 0));
+  }
+
+  // ── Enregistrement du poids depuis le champ perf ──────────────────────────
+  function savePoidsEntry(val) {
+    const v = parseFloat(val);
+    if (isNaN(v) || v < 30 || v > 200) return;
+    const entry = { date: todayKey(), poids: v };
+    const hist = poidsHist.filter(e => e.date !== todayKey());
+    savePoidsHist([...hist, entry].sort((a,b)=>a.date.localeCompare(b.date)));
+  }
+
+  // ── Protéines par repas ────────────────────────────────────────────────────
+  function protByMeal(dk) {
+    const entries = foods[dk] || [];
+    return MEALS.reduce((acc, m) => {
+      acc[m] = entries.filter(e=>e.meal===m).reduce((s,e)=>s+e.prot,0);
+      return acc;
+    }, {});
+  }
+
+  // ── Historique N jours ─────────────────────────────────────────────────────
+  function getLastNDays(n) {
+    return Array.from({length:n},(_,i)=>{
+      const d = new Date(); d.setDate(d.getDate()-(n-1-i));
+      return d.toISOString().split("T")[0];
+    });
+  }
+
+  // ── Repas favoris ─────────────────────────────────────────────────────────
+  async function saveAsFavori(entry) {
+    const name = prompt(`Sauvegarder "${entry.name}" comme favori ?\nNom du favori (laisser vide = nom de l'aliment) :`);
+    if (name === null) return; // annulé
+    await saveFavRepas([...favRepas, {
+      id: Date.now(),
+      name: name.trim() || entry.name,
+      entry: { name: entry.name, qty: entry.qty, cal: entry.cal, prot: entry.prot },
+    }]);
+  }
+
+  async function applyFavori(fav, targetMeal) {
+    const newEntry = { ...fav.entry, id: Date.now() + Math.random(), meal: targetMeal };
+    await saveFoods({...foods, [foodDate]: [...(foods[foodDate]||[]), newEntry]});
+  }
+
+  async function deleteFavori(id) {
+    await saveFavRepas(favRepas.filter(f=>f.id!==id));
+  }
+
+  function getPlanType(dk) {
+    return getPlanForDate(dk).type;
+  }
+
+  function targetCal(dk) {
+    // Priorité : calories sport loggées > calories sport manuelles (si c'est aujourd'hui) > plan prévu
+    const burned = calBrulees(dk);
+    if (burned > 0) return TARGETS.cal + burned;
+    if (dk === today && parseFloat(sportManuel) > 0) return TARGETS.cal + parseFloat(sportManuel);
+    return TARGETS.cal + (CAL_SPORT[getPlanType(dk)] || 0);
+  }
+
+  // Calories brûlées réellement loggées pour un jour
+  // Course : formule Minetti (0.9 kcal/kg/km) si allure connue, sinon MET
+  // Calisthénie : coefficient ×0.5 pour compenser les temps de repos
+  function calBrulees(dk) {
+    const sess = sessions[dk];
+    if (!sess || !sess.done || sess.estRepos) return 0;
+    const ACTIVITES_MET = {course_ef:9, fractionne:12, calistenie:5, marche:4, velo:8, natation:8, yoga:3, autre:5};
+    const CALI_EXOS_KCAL = {planche:3.5,planche_lat:3.0,releve_jambes:4.0,tuck_lsit:4.5,traction_neg:5.5,traction:6.0,dead_hang:3.0,dips:5.0,pompes:4.5,pike_pushup:4.0,squat:5.0,fentes:5.0,gainage_total:4.0,burpees:8.0,mountain_cl:7.0};
+    const poids = 78;
+    const activites = sess.activites || [];
+    const durees = sess.durees || {};
+    const allures = sess.allures || {};
+    const exosCali = sess.exosCali || [];
+    let total = 0;
+    activites.forEach(actId => {
+      const dur = parseFloat(durees[actId]) || 0;
+      if (dur === 0) return;
+      if ((actId === "course_ef" || actId === "fractionne") && allures[actId]) {
+        // Formule Minetti
+        const allureMin = parseFloat(allures[actId]);
+        if (!isNaN(allureMin) && allureMin > 0) {
+          const vitesseKmh = 60 / allureMin;
+          const distKm = vitesseKmh * (dur / 60);
+          const coeff = allureMin < 5 ? 1.08 : 1.0;
+          total += Math.round(0.9 * poids * distKm * coeff);
+          return;
+        }
+      }
+      if (actId === "calistenie") {
+        if (exosCali.length > 0) {
+          const avgKcal = exosCali.reduce((s,eid)=>s+(CALI_EXOS_KCAL[eid]||5),0) / exosCali.length;
+          total += Math.round(avgKcal * dur * 0.5);
+        } else {
+          total += Math.round((ACTIVITES_MET.calistenie * poids * dur * 0.5) / 200);
+        }
+      } else {
+        const met = ACTIVITES_MET[actId] || 5;
+        total += Math.round((met * poids * dur) / 200);
+      }
+    });
+    return total;
+  }
+
+  function dayTotals(dk) {
+    return (foods[dk] || []).reduce((a, e) => ({ cal: a.cal + e.cal, prot: a.prot + e.prot }), {cal:0,prot:0});
+  }
+
+  function deficit(dk) {
+    const {cal} = dayTotals(dk);
+    if (cal === 0) return null;
+    // Déficit = (métabolisme base + calories brûlées sport) - calories mangées
+    const burned = calBrulees(dk);
+    const base = TARGETS.cal;
+    return (base + burned) - cal;
+  }
+
+  function calcQty(food, q) {
+    const g = food.unit === "g" || food.unit === "ml" ? parseFloat(q) : parseFloat(q) * food.unitG;
+    return { cal: Math.round(food.cal100 * g / 100), prot: Math.round(food.prot100 * g / 100) };
+  }
+
+  async function addFood() {
+    let entry;
+    if (mode === "db" && picked && qty) {
+      const {cal, prot} = calcQty(picked, qty);
+      entry = {id: Date.now(), name: picked.name, qty: `${qty} ${picked.unit}`, meal, cal, prot};
+    } else if (mode === "custom" && custom.name && custom.cal) {
+      entry = {id: Date.now(), name: custom.name, qty: "—", meal, cal: +custom.cal||0, prot: +custom.prot||0};
+    }
+    if (!entry) return;
+    await saveFoods({...foods, [foodDate]: [...(foods[foodDate]||[]), entry]});
+    setPicked(null); setQty(""); setSearch(""); setCustom({name:"",cal:"",prot:""});
+  }
+
+  async function removeFood(dk, id) {
+    await saveFoods({...foods, [dk]: (foods[dk]||[]).filter(e => e.id !== id)});
+  }
+
+  async function moveFood(dk, id, targetMeal) {
+    const updated = (foods[dk]||[]).map(e => e.id === id ? {...e, meal: targetMeal} : e);
+    await saveFoods({...foods, [dk]: updated});
+    setMovingFood(null);
+  }
+
+  async function saveSession(dk) {
+    const durees = sessForm.durees || {};
+    const totalDuree = (sessForm.activites||[]).reduce((s,a)=>s+(parseFloat(durees[a])||0),0);
+    const dureeToSave = totalDuree > 0 ? String(totalDuree) : (sessForm.duree||"");
+    await saveSessions({...sessions, [dk]: {
+      ...sessForm,
+      duree: dureeToSave,
+      allures: sessForm.allures || {},
+      done: true,
+    }});
+    setSessModal(null);
+  }
+
+  async function delSession(dk) {
+    const s = {...sessions}; delete s[dk];
+    await saveSessions(s); setSessModal(null);
+  }
+
+  const allDone    = Object.keys(sessions).filter(k => sessions[k]?.done);
+  const weekDone   = weekDates.filter(d => sessions[d]?.done).length;
+  const last7      = Array.from({length:7},(_,i) => { const d = new Date(); d.setDate(d.getDate()-(6-i)); return d.toISOString().split("T")[0]; });
+  const filteredDB = fuzzySearch(search, FOOD_DB, catFilter);
+
+  // 8 derniers aliments uniques loggés (toutes dates confondues)
+  const recentFoods = useMemo(() => {
+    const all = Object.values(foods).flat();
+    const seen = new Set();
+    return all.reverse().filter(e => {
+      if (seen.has(e.name)) return false;
+      seen.add(e.name); return true;
+    }).slice(0, 8);
+  }, [foods]);
+
+  if (!sReady||!fReady||!pReady||!phReady||!frReady) return (
+    <div style={{background:C.bg,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{color:C.textMuted,fontSize:"12px",letterSpacing:"4px",fontFamily:"monospace"}}>CHARGEMENT…</div>
+    </div>
+  );
+
+  return (
+    <div style={{fontFamily:"'Georgia',serif",background:C.bg,minHeight:"100vh",color:C.text}}>
+
+      {/* ── HEADER ── */}
+      <div style={{background:"#111",borderBottom:`2px solid ${C.border}`,padding:"20px 18px 16px"}}>
+        <div style={{fontSize:"9px",letterSpacing:"4px",color:C.textMuted,marginBottom:"4px",fontFamily:"monospace"}}>PROGRAMME 8 SEMAINES</div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
+          <div style={{fontSize:"22px",fontWeight:"400",color:C.text,letterSpacing:"-0.3px"}}>Sport & Nutrition</div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:"9px",color:C.textMuted,letterSpacing:"2px",marginBottom:"2px"}}>SEMAINE</div>
+            <div style={{fontSize:"28px",fontWeight:"300",lineHeight:1,color:weekDone>=6?C.green:C.gold}}>
+              {weekDone}<span style={{fontSize:"13px",color:C.textMuted}}>/6</span>
+            </div>
+          </div>
+        </div>
+        <div style={{marginTop:"12px",height:"3px",background:"#333",borderRadius:"2px"}}>
+          <div style={{height:"100%",width:`${Math.min(100,weekDone/6*100)}%`,background:`linear-gradient(90deg,${C.gold},${C.goldLight})`,borderRadius:"2px",transition:"width .5s"}}/>
+        </div>
+      </div>
+
+      {/* ── NAV ── */}
+      <div style={{display:"flex",background:"#111",borderBottom:`2px solid ${C.border}`,overflowX:"auto"}}>
+        {[["semaine","Sport"],["alimentation","Aliments"],["progres","Progrès"],["historique","Historique"],["reference","Référence"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{
+            flexShrink:0,padding:"13px 10px",background:"none",border:"none",
+            borderBottom:tab===id?`2px solid ${C.gold}`:"2px solid transparent",
+            color:tab===id?C.gold:C.textMuted,
+            fontSize:"9px",letterSpacing:"1px",textTransform:"uppercase",cursor:"pointer",fontFamily:"monospace",fontWeight:"600",
+          }}>{label}</button>
+        ))}
+      </div>
+
+      <div style={{padding:"16px 16px 90px"}}>
+
+        {/* ══ SEMAINE ══ */}
+        {tab==="semaine" && <>
+          {/* ── Indicateur de rythme ── */}
+          {wk === 0 && (()=>{
+            const stats = weekStats();
+            const TARGET_COURSE = 3, TARGET_CALI = 3;
+            const missingCourse = Math.max(0, TARGET_COURSE - stats.courseCount);
+            const missingCali = Math.max(0, TARGET_CALI - stats.caliCount);
+            const dayOfWeek = (new Date().getDay() + 6) % 7; // 0=lun, 6=dim
+            const isLate = dayOfWeek >= 4; // jeudi+
+
+            return (
+              <div style={{...S.cardHi, padding:"13px 14px", marginBottom:"14px"}}>
+                <div style={{fontSize:"9px",letterSpacing:"2px",color:C.textMuted,marginBottom:"10px",textTransform:"uppercase",fontFamily:"monospace"}}>Objectif semaine</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px"}}>
+                  {[
+                    { label:"Course", done:stats.courseCount, target:TARGET_COURSE, icon:"◎", col:C.blue },
+                    { label:"Calisthénie", done:stats.caliCount, target:TARGET_CALI, icon:"◈", col:C.gold },
+                  ].map(({label,done,target,icon,col})=>{
+                    const ok = done >= target;
+                    const warn = !ok && isLate;
+                    return (
+                      <div key={label} style={{background:"#111",borderRadius:"6px",padding:"10px 12px",border:`1px solid ${ok?C.green:warn?C.gold:C.border}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px"}}>
+                          <span style={{fontSize:"11px",color:ok?C.green:warn?C.gold:C.textSub,fontWeight:"600"}}>{icon} {label}</span>
+                          <span style={{fontSize:"14px",fontFamily:"monospace",color:ok?C.green:warn?C.gold:C.text,fontWeight:"700"}}>{done}/{target}</span>
+                        </div>
+                        <div style={{display:"flex",gap:"4px"}}>
+                          {Array.from({length:target}).map((_,i)=>(
+                            <div key={i} style={{flex:1,height:"5px",borderRadius:"3px",background:i<done?(ok?C.green:col):"#333"}}/>
+                          ))}
+                        </div>
+                        {warn && <div style={{fontSize:"9px",color:C.gold,marginTop:"5px"}}>⚠️ {target-done} séance{target-done>1?"s":""} manquante{target-done>1?"s":""}</div>}
+                        {ok && <div style={{fontSize:"9px",color:C.green,marginTop:"5px"}}>✓ Objectif atteint</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ── Navigation semaine ── */}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}}>
+            <button onClick={()=>setWk(w=>w-1)} style={S.navBtn}>←</button>
+            <span style={{fontSize:"10px",letterSpacing:"3px",color:C.textSub,textTransform:"uppercase",fontFamily:"monospace"}}>
+              {wk===0?"Cette semaine":wk===-1?"Semaine passée":`S ${wk>0?"+":""}${wk}`}
+            </span>
+            <button onClick={()=>setWk(w=>w+1)} style={S.navBtn}>→</button>
+          </div>
+
+          {/* ── Jours ── */}
+          {weekDates.map((dk,i) => {
+            const plan = getPlanForDate(dk);
+            const isOverridden = (()=>{
+              const dates = getWeekDates(wk);
+              const wkKey = weekKey(dates[0]);
+              return weekOverrides[wkKey] && weekOverrides[wkKey][i] !== undefined;
+            })();
+            const done = sessions[dk]?.done;
+            const isToday = dk===today;
+            const d = new Date(dk+"T12:00:00");
+            const {cal,prot} = dayTotals(dk);
+            const def = deficit(dk);
+            const burned = calBrulees(dk);
+            return (
+              <div key={dk} style={{
+                ...S.card,
+                padding:"11px 12px",marginBottom:"6px",
+                display:"flex",alignItems:"center",gap:"10px",
+                border:isToday?`1.5px solid ${C.gold}`:S.card.border,
+                background:isToday?C.cardHi:C.card,
+              }}>
+                {/* Jour */}
+                <div style={{width:"34px",flexShrink:0,textAlign:"center"}}>
+                  <div style={{fontSize:"11px",fontWeight:"700",color:isToday?C.gold:C.textSub,fontFamily:"monospace"}}>{DAYS_SHORT[i]}</div>
+                  <div style={{fontSize:"10px",color:C.textMuted,marginTop:"1px"}}>{d.getDate()}/{d.getMonth()+1}</div>
+                </div>
+
+                {/* Icône séance */}
+                <div style={{fontSize:"17px",color:plan.color,flexShrink:0}}>{plan.icon}</div>
+
+                {/* Infos */}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                    <span style={{fontSize:"13px",color:C.text,fontWeight:"500"}}>{plan.label}</span>
+                    {isOverridden && <span style={{fontSize:"9px",color:C.gold,background:"#2a2000",padding:"1px 5px",borderRadius:"3px",fontFamily:"monospace"}}>modifié</span>}
+                  </div>
+                  <div style={{fontSize:"10px",color:C.textMuted,marginTop:"1px"}}>{plan.detail}</div>
+                  {cal>0 && (
+                    <div style={{display:"flex",gap:"8px",marginTop:"4px",flexWrap:"wrap"}}>
+                      <span style={{fontSize:"10px",color:def!==null&&def>200?C.green:def!==null&&def<-50?C.red:C.textSub}}>
+                        {cal} kcal{burned>0?` 🏃${burned}`:""} {def!==null?(def>0?`−${def}`:`+${Math.abs(def)}!`):""}
+                      </span>
+                      <span style={{fontSize:"10px",color:prot>=160?C.blue:C.textMuted}}>{prot}g prot.</span>
+                    </div>
+                  )}
+                  {done && (sessions[dk]?.estRepos ? (
+                    <div style={{fontSize:"10px",color:C.textMuted,marginTop:"3px"}}>◇ Repos</div>
+                  ) : sessions[dk]?.activites?.length ? (
+                    <div style={{fontSize:"10px",color:C.green,marginTop:"3px",fontWeight:"600"}}>
+                      ✓ {sessions[dk].activites.map(a=>{
+                        const LABELS={course_ef:"Course EF",fractionne:"Fractionné",calistenie:"Calisthénie",marche:"Marche",velo:"Vélo",natation:"Natation",yoga:"Yoga",autre:sessions[dk].activiteCustom||"Autre"};
+                        const dur = sessions[dk].durees?.[a];
+                        return LABELS[a]+(dur?` ${dur}min`:"");
+                      }).join(" + ")} {RESSENTI[+sessions[dk].ressenti]}
+                    </div>
+                  ) : null)}
+                </div>
+
+                {/* Boutons */}
+                <div style={{display:"flex",flexDirection:"column",gap:"4px",flexShrink:0}}>
+                  {/* Éditer le programme prévu */}
+                  <button onClick={()=>setEditDay({dateKey:dk,dayIdx:i})} title="Modifier la séance prévue" style={{
+                    background:"#1e1e1e",border:`1px solid ${C.border}`,
+                    color:isOverridden?C.gold:C.textMuted,
+                    padding:"4px 7px",borderRadius:"4px",fontSize:"11px",cursor:"pointer",
+                  }}>✏️</button>
+                  {/* Logger la séance */}
+                  <button onClick={()=>{
+                    setSessModal(dk);
+                    const ex=sessions[dk]||{};
+                    const defaultActivites = ex.activites || (plan.type==="repos"?[]:(plan.type==="course"?(plan.label.includes("Fractionné")?["fractionne"]:["course_ef"]):["calistenie"]));
+                    setSessForm({duree:ex.duree||"",ressenti:ex.ressenti||"3",note:ex.note||"",activites:defaultActivites,activiteCustom:ex.activiteCustom||"",estRepos:ex.estRepos||false,durees:ex.durees||{},exosCali:ex.exosCali||[],allures:ex.allures||{}});
+                  }} style={{
+                    background:done?"#1a3a12":"#1e1e1e",
+                    border:done?`1.5px solid ${C.green}`:`1.5px solid ${C.border}`,
+                    color:done?C.green:C.textMuted,padding:"5px 8px",borderRadius:"5px",fontSize:"11px",cursor:"pointer",fontWeight:done?"700":"400",
+                  }}>{done?"✓":"Logger"}</button>
+                  {/* Aliments */}
+                  <button onClick={()=>{setFoodDate(dk);setTab("alimentation");}} style={{
+                    background:cal>0?"#102030":"#1e1e1e",border:cal>0?`1.5px solid ${C.blue}`:`1.5px solid ${C.border}`,
+                    color:cal>0?C.blue:C.textMuted,padding:"4px 7px",borderRadius:"4px",fontSize:"12px",cursor:"pointer",
+                  }}>🍽</button>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* ── Modal édition du programme d'un jour ── */}
+          {editDay && (()=>{
+            const {dateKey, dayIdx} = editDay;
+            const d = new Date(dateKey+"T12:00:00");
+            const current = getPlanForDate(dateKey);
+            const stats = weekStats();
+            const missingCourse = Math.max(0, 3 - stats.courseCount);
+            const missingCali = Math.max(0, 3 - stats.caliCount);
+
+            return (
+              <div style={{position:"fixed",inset:0,background:C.overlay,zIndex:300,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+                onClick={()=>setEditDay(null)}>
+                <div onClick={e=>e.stopPropagation()} style={{background:"#1a1a1a",border:`2px solid ${C.border}`,borderRadius:"16px 16px 0 0",padding:"22px 18px",width:"100%",maxWidth:"480px",maxHeight:"85vh",overflowY:"auto"}}>
+                  <div style={{fontSize:"10px",letterSpacing:"3px",color:C.textMuted,marginBottom:"6px",textTransform:"uppercase",fontFamily:"monospace"}}>
+                    Programme · {DAYS_FULL[dayIdx]} {d.getDate()}/{d.getMonth()+1}
+                  </div>
+                  <div style={{fontSize:"11px",color:C.textSub,marginBottom:"16px"}}>
+                    Actuellement prévu : <span style={{color:current.color,fontWeight:"600"}}>{current.icon} {current.label}</span>
+                  </div>
+
+                  <div style={{display:"flex",flexDirection:"column",gap:"6px"}}>
+                    {SEANCE_OPTIONS.map(opt=>{
+                      const isCurrent = current.label === opt.label && current.type === opt.type;
+                      // Recommandation intelligente
+                      const isRecommended =
+                        (opt.type==="course" && missingCourse > 0 && opt.type !== current.type) ||
+                        (opt.type==="calistenie" && missingCali > 0 && opt.type !== current.type);
+
+                      return (
+                        <button key={opt.label} onClick={()=>saveDayOverride(dateKey, dayIdx, opt)} style={{
+                          display:"flex",alignItems:"center",gap:"12px",
+                          padding:"11px 14px",
+                          background: isCurrent ? "#2a2000" : isRecommended ? "#0a1a08" : "#111",
+                          border: isCurrent ? `1.5px solid ${C.gold}` : isRecommended ? `1.5px solid ${C.green}` : `1px solid ${C.border}`,
+                          borderRadius:"8px",cursor:"pointer",textAlign:"left",
+                        }}>
+                          <span style={{fontSize:"18px",color:opt.color,flexShrink:0}}>{opt.icon}</span>
+                          <div style={{flex:1}}>
+                            <div style={{fontSize:"13px",color:isCurrent?C.gold:C.text,fontWeight:isCurrent?"700":"500"}}>{opt.label}</div>
+                            <div style={{fontSize:"10px",color:C.textMuted,marginTop:"1px"}}>{opt.detail}</div>
+                          </div>
+                          {isCurrent && <span style={{fontSize:"10px",color:C.gold,fontFamily:"monospace"}}>actuel</span>}
+                          {isRecommended && !isCurrent && (
+                            <span style={{fontSize:"9px",color:C.green,background:"#0a2010",padding:"2px 6px",borderRadius:"3px",fontFamily:"monospace"}}>
+                              recommandé · {opt.type==="course"?`${missingCourse} course${missingCourse>1?"s":""} manquante${missingCourse>1?"s":""}`:
+                              `${missingCali} cali${missingCali>1?"s":""} manquante${missingCali>1?"s":""}`}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Réinitialiser */}
+                  {(()=>{
+                    const dates = getWeekDates(wk);
+                    const wkKey = weekKey(dates[0]);
+                    const hasOverride = weekOverrides[wkKey] && weekOverrides[wkKey][dayIdx] !== undefined;
+                    return hasOverride ? (
+                      <button onClick={()=>resetDayOverride(dateKey,dayIdx)} style={{width:"100%",marginTop:"12px",padding:"10px",background:"none",border:`1px solid ${C.border}`,color:C.textMuted,borderRadius:"6px",fontSize:"11px",cursor:"pointer"}}>
+                        ↺ Revenir au programme par défaut
+                      </button>
+                    ) : null;
+                  })()}
+                </div>
+              </div>
+            );
+          })()}
+        </>}
+
+        {/* ══ ALIMENTATION ══ */}
+        {tab==="alimentation" && <>
+          {/* Alerte protéines en temps réel */}
+          {(()=>{
+            const {prot} = dayTotals(foodDate);
+            const manquant = 160 - prot;
+            if (foodDate !== today || prot === 0) return null;
+            if (manquant <= 0) return (
+              <div style={{padding:"10px 14px",background:"#0a2010",border:`1.5px solid ${C.green}`,borderRadius:"8px",marginBottom:"10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <span style={{fontSize:"12px",color:C.green,fontWeight:"600"}}>✓ Cible protéines atteinte ({prot}g)</span>
+              </div>
+            );
+            // Suggestions pour combler le manque
+            const suggestions = [
+              {name:"Skyr 200g",prot:22},{name:"Œufs brouillés (2)",prot:16},{name:"Tofu ferme 150g",prot:24},
+              {name:"Fromage blanc 200g",prot:18},{name:"Lentilles 200g",prot:18}
+            ];
+            const sugg = suggestions.find(s=>s.prot>=manquant*0.6 && s.prot<=manquant*1.4) || suggestions[0];
+            return (
+              <div style={{padding:"10px 14px",background:"#201000",border:`1.5px solid ${C.gold}`,borderRadius:"8px",marginBottom:"10px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:"12px",color:C.gold,fontWeight:"600"}}>⚠️ Il manque {manquant}g de protéines</span>
+                  <span style={{fontSize:"11px",color:C.textSub}}>{prot}g / 160g min</span>
+                </div>
+                <div style={{fontSize:"10px",color:C.textMuted,marginTop:"5px"}}>
+                  → Ex : {sugg.name} ≈ {sugg.prot}g prot.
+                </div>
+              </div>
+            );
+          })()}
+
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px"}}>
+            <button onClick={()=>{const d=new Date(foodDate+"T12:00:00");d.setDate(d.getDate()-1);setFoodDate(d.toISOString().split("T")[0]);}} style={S.navBtn}>←</button>
+            <div style={{textAlign:"center"}}>
+              <div style={{fontSize:"10px",letterSpacing:"3px",color:C.textSub,textTransform:"uppercase",fontFamily:"monospace"}}>
+                {foodDate===today?"Aujourd'hui":(()=>{const d=new Date(foodDate+"T12:00:00");return `${DAYS_FULL[(d.getDay()+6)%7]} ${d.getDate()}/${d.getMonth()+1}`;})()}
+              </div>
+            </div>
+            <button onClick={()=>{const d=new Date(foodDate+"T12:00:00");d.setDate(d.getDate()+1);setFoodDate(d.toISOString().split("T")[0]);}} style={S.navBtn}>→</button>
+          </div>
+
+          {/* Summary */}
+          {(()=>{
+            const {cal,prot}=dayTotals(foodDate);
+            const burned=calBrulees(foodDate);
+            const tgt=targetCal(foodDate);
+            const def=tgt-cal;
+            const hasSport = burned > 0;
+            const hasSportManuel = foodDate===today && parseFloat(sportManuel)>0 && burned===0;
+            return (
+              <div style={{...S.cardHi,padding:"16px",marginBottom:"14px"}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
+                  {[
+                    {val:cal||"—",label:"Kcal mangées",color:C.gold},
+                    {val:prot?`${prot}g`:"—",label:"Protéines",color:C.blue},
+                    {val:cal===0?"—":def>0?`−${def}`:`+${Math.abs(def)}`,label:"Déficit",color:cal===0?C.textMuted:def>200?C.green:def>0?C.gold:C.red},
+                  ].map(x=>(
+                    <div key={x.label} style={{textAlign:"center"}}>
+                      <div style={{fontSize:"22px",fontWeight:"300",color:x.color}}>{x.val}</div>
+                      <div style={{fontSize:"9px",color:C.textMuted,letterSpacing:"1px",fontFamily:"monospace",marginTop:"2px"}}>{x.label}</div>
+                    </div>
+                  ))}
+                </div>
+                {hasSport && (
+                  <div style={{fontSize:"10px",color:C.green,marginBottom:"8px",fontFamily:"monospace",textAlign:"center"}}>
+                    🏃 {burned} kcal brûlées (loggées) · cible : {tgt} kcal
+                  </div>
+                )}
+                {/* Sport manuel si pas encore loggé */}
+                {foodDate===today && !hasSport && (
+                  <div style={{marginBottom:"10px",display:"flex",alignItems:"center",gap:"8px"}}>
+                    <div style={{fontSize:"10px",color:C.textMuted,flexShrink:0}}>🏃 Sport fait aujourd'hui (kcal) :</div>
+                    <input value={sportManuel} onChange={e=>{
+                      const v=e.target.value;
+                      if(v===""||(!isNaN(parseFloat(v))&&parseFloat(v)>=0&&parseFloat(v)<=2000)) setSportManuel(v);
+                    }} placeholder="ex: 300" type="number"
+                    style={{...S.input,padding:"5px 8px",fontSize:"12px",width:"90px"}}/>
+                    {hasSportManuel&&<span style={{fontSize:"10px",color:C.gold}}>cible : {tgt} kcal</span>}
+                  </div>
+                )}
+                {[
+                  {label:`Calories · cible ${tgt} kcal`,pct:Math.min(120,cal/tgt*100),over:cal>tgt,c1:C.gold},
+                  {label:"Protéines · cible 160-180g",pct:Math.min(120,prot/170*100),over:false,c1:C.blue},
+                ].map(bar=>(
+                  <div key={bar.label} style={{marginBottom:"8px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:"4px"}}>
+                      <span style={{fontSize:"10px",color:C.textSub}}>{bar.label}</span>
+                      <span style={{fontSize:"10px",color:C.textMuted,fontFamily:"monospace"}}>{Math.round(bar.pct)}%</span>
+                    </div>
+                    <div style={{height:"5px",background:"#111",borderRadius:"3px",border:`1px solid ${C.border}`}}>
+                      <div style={{height:"100%",width:`${bar.pct}%`,background:bar.over?C.red:bar.c1,borderRadius:"3px",transition:"width .4s"}}/>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
+          {/* Protéines par repas — barre de progression */}
+          {(()=>{
+            const pbm = protByMeal(foodDate);
+            const totalProt = Object.values(pbm).reduce((a,v)=>a+v,0);
+            if (totalProt === 0) return null;
+            const cible = 170;
+            return (
+              <div style={{...S.card,padding:"12px 14px",marginBottom:"12px"}}>
+                <div style={{fontSize:"9px",letterSpacing:"2px",color:C.textMuted,marginBottom:"10px",textTransform:"uppercase",fontFamily:"monospace"}}>Protéines par repas · {totalProt}g / {cible}g</div>
+                {MEALS.map(m=>{
+                  const p = pbm[m] || 0;
+                  if (p === 0) return null;
+                  return (
+                    <div key={m} style={{marginBottom:"7px"}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:"3px"}}>
+                        <span style={{fontSize:"10px",color:C.textSub,textTransform:"capitalize"}}>{m}</span>
+                        <span style={{fontSize:"10px",color:C.blue,fontFamily:"monospace"}}>{p}g</span>
+                      </div>
+                      <div style={{height:"4px",background:"#111",borderRadius:"2px"}}>
+                        <div style={{height:"100%",width:`${Math.min(100,p/cible*100)}%`,background:C.blue,borderRadius:"2px",opacity:0.8}}/>
+                      </div>
+                    </div>
+                  );
+                })}
+                {totalProt < 160 && (
+                  <div style={{fontSize:"10px",color:C.gold,marginTop:"8px"}}>
+                    ⚠️ {160-totalProt}g de protéines manquantes pour atteindre la cible minimale
+                  </div>
+                )}
+                {totalProt >= 160 && (
+                  <div style={{fontSize:"10px",color:C.green,marginTop:"8px"}}>✓ Cible protéines atteinte</div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Meals */}
+          {MEALS.map(m=>{
+            const entries=(foods[foodDate]||[]).filter(e=>e.meal===m);
+            const mCal=entries.reduce((a,e)=>a+e.cal,0);
+            const mProt=entries.reduce((a,e)=>a+e.prot,0);
+            return (
+              <div key={m} style={{marginBottom:"12px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px"}}>
+                  <div style={{fontSize:"10px",letterSpacing:"2px",color:C.textSub,textTransform:"uppercase",fontFamily:"monospace",fontWeight:"600"}}>{m}</div>
+                  {entries.length>0&&<span style={{fontSize:"11px",color:C.textMuted,fontFamily:"monospace"}}>{mCal} kcal · {mProt}g</span>}
+                </div>
+                {entries.length===0?(
+                  <div style={{padding:"10px 12px",background:"#111",border:`1px dashed ${C.border}`,borderRadius:"6px",fontSize:"11px",color:C.textMuted}}>Rien enregistré</div>
+                ):entries.map(e=>(
+                  <div key={e.id} style={{...S.card,padding:"10px 13px",marginBottom:"5px"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:"13px",color:C.text,fontWeight:"500"}}>{e.name}</div>
+                        <div style={{fontSize:"10px",color:C.textMuted,marginTop:"2px"}}>{e.qty}</div>
+                      </div>
+                      <span style={{fontSize:"12px",color:C.gold,fontFamily:"monospace",fontWeight:"600",flexShrink:0}}>{e.cal}</span>
+                      <span style={{fontSize:"12px",color:C.blue,fontFamily:"monospace",flexShrink:0}}>{e.prot}g</span>
+                      <button onClick={()=>saveAsFavori(e)} title="Sauvegarder en favori" style={{background:"none",border:"none",color:C.textMuted,cursor:"pointer",fontSize:"15px",padding:"0 2px",flexShrink:0}}>⭐</button>
+                      <button onClick={()=>setMovingFood(movingFood?.id===e.id?null:{id:e.id,currentMeal:m})} title="Déplacer vers un autre repas"
+                        style={{background:movingFood?.id===e.id?"#1a2a3a":"none",border:movingFood?.id===e.id?`1px solid ${C.blue}`:"none",color:movingFood?.id===e.id?C.blue:C.textMuted,cursor:"pointer",fontSize:"14px",padding:"0 3px",borderRadius:"3px",flexShrink:0}}>⇄</button>
+                      <button onClick={()=>removeFood(foodDate,e.id)} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:"18px",padding:"0 3px",lineHeight:1,flexShrink:0}}>×</button>
+                    </div>
+                    {/* Sélecteur de repas destination */}
+                    {movingFood?.id===e.id && (
+                      <div style={{marginTop:"8px",paddingTop:"8px",borderTop:`1px solid ${C.border}`}}>
+                        <div style={{fontSize:"9px",color:C.textMuted,marginBottom:"6px",letterSpacing:"1px"}}>DÉPLACER VERS :</div>
+                        <div style={{display:"flex",gap:"5px",flexWrap:"wrap"}}>
+                          {MEALS.filter(meal=>meal!==m).map(meal=>(
+                            <button key={meal} onClick={()=>moveFood(foodDate,e.id,meal)} style={{
+                              padding:"5px 10px",background:"#111",
+                              border:`1px solid ${C.border}`,color:C.textSub,
+                              borderRadius:"4px",fontSize:"10px",cursor:"pointer",
+                              textTransform:"capitalize",
+                            }}>{meal==="petit-déjeuner"?"P-déj":meal==="déjeuner"?"Déj":meal==="dîner"?"Dîner":"Collation"}</button>
+                          ))}
+                          <button onClick={()=>setMovingFood(null)} style={{padding:"5px 10px",background:"none",border:`1px solid ${C.border}`,color:C.textMuted,borderRadius:"4px",fontSize:"10px",cursor:"pointer"}}>Annuler</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+
+          {/* Favoris */}
+          {favRepas.length > 0 && (
+            <div style={{marginBottom:"12px"}}>
+              <div style={{fontSize:"9px",letterSpacing:"2px",color:C.textMuted,marginBottom:"8px",textTransform:"uppercase",fontFamily:"monospace"}}>⭐ Favoris — ajouter à :</div>
+              <div style={{display:"flex",flexDirection:"column",gap:"5px"}}>
+                {favRepas.map(fav=>(
+                  <div key={fav.id} style={{...S.card,padding:"9px 12px",display:"flex",alignItems:"center",gap:"8px"}}>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:"12px",color:C.text,fontWeight:"500"}}>{fav.name}</div>
+                      <div style={{fontSize:"10px",color:C.textMuted}}>{fav.entry?.cal} kcal · {fav.entry?.prot}g prot.</div>
+                    </div>
+                    {/* Boutons repas */}
+                    <div style={{display:"flex",gap:"4px",flexWrap:"wrap",justifyContent:"flex-end"}}>
+                      {MEALS.map(m=>(
+                        <button key={m} onClick={()=>applyFavori(fav,m)} style={{
+                          padding:"4px 7px",background:"#111",
+                          border:`1px solid ${C.border}`,color:C.textSub,
+                          borderRadius:"4px",fontSize:"9px",cursor:"pointer",
+                          textTransform:"capitalize",letterSpacing:"0.5px",
+                        }}>{m==="petit-déjeuner"?"P-déj":m==="déjeuner"?"Déj":m==="dîner"?"Dîner":"Collation"}</button>
+                      ))}
+                    </div>
+                    <button onClick={()=>deleteFavori(fav.id)} style={{background:"none",border:"none",color:C.red,cursor:"pointer",fontSize:"16px",padding:"0 2px",flexShrink:0}}>×</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <button onClick={()=>setFoodModal(true)} style={{width:"100%",padding:"14px",background:C.cardHi,border:`1.5px solid ${C.gold}`,color:C.gold,borderRadius:"8px",fontSize:"12px",letterSpacing:"2px",textTransform:"uppercase",cursor:"pointer",marginTop:"6px",fontWeight:"700"}}>
+            + Ajouter un aliment
+          </button>
+
+          {/* 7j chart */}
+          <div style={{marginTop:"22px"}}>
+            <div style={{fontSize:"10px",letterSpacing:"3px",color:C.textMuted,marginBottom:"10px",textTransform:"uppercase",fontFamily:"monospace"}}>7 derniers jours</div>
+            <div style={{display:"flex",gap:"4px",alignItems:"flex-end",height:"60px"}}>
+              {last7.map(dk=>{
+                const {cal}=dayTotals(dk);
+                const tgt=targetCal(dk);
+                const pct=cal>0?Math.min(120,cal/tgt*100):0;
+                const d=new Date(dk+"T12:00:00");
+                return (
+                  <div key={dk} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:"3px",cursor:"pointer"}} onClick={()=>setFoodDate(dk)}>
+                    <div style={{width:"100%",display:"flex",alignItems:"flex-end",height:"46px"}}>
+                      <div style={{width:"100%",height:`${Math.max(2,pct*0.4)}px`,background:dk===foodDate?C.gold:cal>tgt?C.red:cal>0?C.green:"#333",borderRadius:"3px 3px 0 0",border:dk===foodDate?`1px solid ${C.goldLight}`:"none",transition:"height .3s"}}/>
+                    </div>
+                    <div style={{fontSize:"9px",color:dk===foodDate?C.gold:C.textMuted,fontFamily:"monospace"}}>
+                      {DAYS_SHORT[(d.getDay()+6)%7]}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{marginTop:"6px",fontSize:"9px",color:C.textMuted}}>🟢 déficit · 🔴 excès · hauteur = % cible</div>
+          </div>
+        </>}
+
+        {/* ══ PROGRÈS ══ */}
+        {tab==="progres" && <>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"8px",marginBottom:"18px"}}>
+            {[
+              {label:"Séances",val:allDone.length,color:C.gold},
+              {label:"Ressenti moy.",val:allDone.length?(allDone.reduce((a,k)=>a+(+sessions[k].ressenti||3),0)/allDone.length).toFixed(1):"—",color:C.blue},
+              {label:"Sem. actives",val:Math.floor(allDone.length/6),color:C.green},
+            ].map(s=>(
+              <div key={s.label} style={{...S.cardHi,padding:"14px 8px",textAlign:"center"}}>
+                <div style={{fontSize:"26px",fontWeight:"300",color:s.color}}>{s.val}</div>
+                <div style={{fontSize:"9px",color:C.textMuted,letterSpacing:"1px",marginTop:"4px",fontFamily:"monospace"}}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {(()=>{
+            const logged=last7.filter(dk=>(foods[dk]||[]).length>0);
+            if(!logged.length) return (
+              <div style={{...S.card,padding:"14px",marginBottom:"16px",fontSize:"12px",color:C.textMuted,textAlign:"center"}}>Aucune donnée nutritionnelle enregistrée</div>
+            );
+            const avgCal=Math.round(logged.reduce((a,dk)=>a+dayTotals(dk).cal,0)/logged.length);
+            const avgProt=Math.round(logged.reduce((a,dk)=>a+dayTotals(dk).prot,0)/logged.length);
+            const avgDef=Math.round(logged.reduce((a,dk)=>a+(deficit(dk)||0),0)/logged.length);
+            return (
+              <div style={{...S.cardHi,padding:"14px",marginBottom:"16px"}}>
+                <div style={{fontSize:"10px",letterSpacing:"2px",color:C.textMuted,marginBottom:"10px",textTransform:"uppercase",fontFamily:"monospace"}}>Moyenne 7 jours logués ({logged.length}j)</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"10px"}}>
+                  {[
+                    {val:avgCal,unit:"kcal/j",color:C.gold},
+                    {val:`${avgProt}g`,unit:"prot./j",color:C.blue},
+                    {val:avgDef>0?`−${avgDef}`:`+${Math.abs(avgDef)}`,unit:"déficit moy.",color:avgDef>0?C.green:C.red},
+                  ].map((x,i)=>(
+                    <div key={i} style={{textAlign:"center"}}>
+                      <div style={{fontSize:"20px",fontWeight:"300",color:x.color,fontFamily:"monospace"}}>{x.val}</div>
+                      <div style={{fontSize:"9px",color:C.textMuted}}>{x.unit}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
+          <div style={{...S.card,padding:"16px",marginBottom:"14px"}}>
+            <div style={{fontSize:"10px",letterSpacing:"2px",color:C.textMuted,marginBottom:"14px",textTransform:"uppercase",fontFamily:"monospace"}}>Performances calisthénie</div>
+            {[
+              {key:"tractions",label:"Tractions complètes",target:"Objectif : 1-3 en 8 sem."},
+              {key:"dips",     label:"Dips consécutifs",   target:"Objectif : séries propres"},
+              {key:"planche",  label:"Planche max",         target:"+5s/semaine"},
+              {key:"poids",    label:"Poids (kg)",          target:"Objectif : 75-76 kg"},
+            ].map(item=>(
+              <div key={item.key} style={{marginBottom:"13px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:"5px"}}>
+                  <label style={{fontSize:"13px",color:C.text,fontWeight:"500"}}>{item.label}</label>
+                  <span style={{fontSize:"10px",color:C.textMuted}}>{item.target}</span>
+                </div>
+                <input value={perf[item.key]} onChange={e=>{
+                  const v = e.target.value;
+                  // Validation selon le champ
+                  const limits = {tractions:{min:0,max:50},dips:{min:0,max:100},planche:{min:0,max:600},poids:{min:30,max:200}};
+                  const lim = limits[item.key]||{min:0,max:9999};
+                  if(v===""||(!isNaN(parseFloat(v))&&parseFloat(v)>=lim.min&&parseFloat(v)<=lim.max)) {
+                    savePerf({...perf,[item.key]:v});
+                    if(item.key==="poids") savePoidsEntry(v);
+                  }
+                }} placeholder="—" style={{...S.input,marginBottom:"4px"}}/>
+                {item.key==="poids"&&perf[item.key]&&(isNaN(parseFloat(perf[item.key]))||parseFloat(perf[item.key])<30||parseFloat(perf[item.key])>200)&&(
+                  <div style={{fontSize:"10px",color:C.red,marginBottom:"4px"}}>Poids doit être entre 30 et 200 kg</div>
+                )}
+              </div>
+            ))}
+
+            {/* Journal poids */}
+            {poidsHist.length > 0 && (
+              <div style={{marginTop:"14px",borderTop:`1px solid ${C.border}`,paddingTop:"12px"}}>
+                <div style={{fontSize:"9px",color:C.textMuted,letterSpacing:"2px",marginBottom:"8px",textTransform:"uppercase",fontFamily:"monospace"}}>Historique du poids</div>
+                <div style={{display:"flex",flexDirection:"column",gap:"4px",maxHeight:"160px",overflowY:"auto"}}>
+                  {[...poidsHist].reverse().slice(0,15).map((e,i)=>{
+                    const prev = [...poidsHist].reverse()[i+1];
+                    const diff = prev ? (e.poids-prev.poids).toFixed(1) : null;
+                    const d = new Date(e.date+"T12:00:00");
+                    return (
+                      <div key={e.date} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 8px",background:"#111",borderRadius:"4px"}}>
+                        <span style={{fontSize:"11px",color:C.textSub}}>{DAYS_SHORT[(d.getDay()+6)%7]} {d.getDate()}/{d.getMonth()+1}</span>
+                        <div style={{display:"flex",gap:"10px",alignItems:"center"}}>
+                          {diff!==null&&<span style={{fontSize:"10px",color:parseFloat(diff)<0?C.green:parseFloat(diff)>0?C.red:C.textMuted}}>{parseFloat(diff)>0?"+":""}{diff} kg</span>}
+                          <span style={{fontSize:"13px",color:C.text,fontFamily:"monospace",fontWeight:"600"}}>{e.poids} kg</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Notifications */}
+          <div style={{...S.card,padding:"14px",marginBottom:"14px"}}>
+            <div style={{fontSize:"10px",letterSpacing:"2px",color:C.textMuted,marginBottom:"10px",textTransform:"uppercase",fontFamily:"monospace"}}>Rappels & Notifications</div>
+            {notifOk ? (
+              <div style={{fontSize:"12px",color:C.green}}>✓ Notifications activées · rappel séance à 18h · rappel repas à 20h</div>
+            ) : (
+              <div>
+                <div style={{fontSize:"11px",color:C.textSub,marginBottom:"10px"}}>Reçois un rappel quotidien pour logger ta séance et tes repas.</div>
+                <button onClick={requestNotif} style={{width:"100%",padding:"11px",background:"#102030",border:`1.5px solid ${C.blue}`,color:C.blue,borderRadius:"6px",fontSize:"12px",cursor:"pointer",fontWeight:"700"}}>
+                  🔔 Activer les notifications
+                </button>
+                <div style={{fontSize:"10px",color:C.textMuted,marginTop:"6px"}}>Fonctionne sur Chrome (Android/ordinateur). Sur iPhone : installe l'app sur l'écran d'accueil d'abord.</div>
+              </div>
+            )}
+          </div>
+
+          <div style={{background:"#1a1500",border:`1.5px solid ${C.gold}`,borderRadius:"8px",padding:"14px"}}>
+            <div style={{fontSize:"10px",letterSpacing:"2px",color:C.gold,marginBottom:"10px",textTransform:"uppercase",fontFamily:"monospace"}}>Objectifs 8 semaines</div>
+            {[
+              ["Perte de poids","1,5 à 2,5 kg réalistes avec le programme"],
+              ["1ère traction complète","Très atteignable à 6-8 semaines"],
+              ["Déficit cible","300-400 kcal/j · ni trop ni trop peu"],
+              ["Jambes moins fatiguées","Dès 2-3 sem. en ralentissant en EF"],
+            ].map(([l,d])=>(
+              <div key={l} style={{display:"flex",gap:"10px",marginBottom:"8px"}}>
+                <span style={{color:C.gold,flexShrink:0}}>◎</span>
+                <div>
+                  <div style={{fontSize:"12px",color:C.goldLight,fontWeight:"600"}}>{l}</div>
+                  <div style={{fontSize:"11px",color:C.textSub,marginTop:"2px"}}>{d}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>}
+
+        {/* ══ HISTORIQUE ══ */}
+        {tab==="historique" && <>
+          {/* Sélecteur de période */}
+          <div style={{display:"flex",gap:"6px",marginBottom:"18px"}}>
+            {[7,30,90].map(n=>(
+              <button key={n} onClick={()=>setHistRange(n)} style={{flex:1,padding:"9px",background:histRange===n?C.cardHi:"#111",border:histRange===n?`1.5px solid ${C.gold}`:`1px solid ${C.border}`,color:histRange===n?C.gold:C.textMuted,borderRadius:"6px",fontSize:"11px",cursor:"pointer",fontWeight:histRange===n?"700":"400"}}>
+                {n===7?"7 jours":n===30?"30 jours":"3 mois"}
+              </button>
+            ))}
+          </div>
+
+          {/* Courbe poids */}
+          {poidsHist.length > 1 && (()=>{
+            const data = poidsHist.slice(-histRange);
+            if (data.length < 2) return null;
+            const vals = data.map(e=>e.poids);
+            const min = Math.min(...vals)-1, max = Math.max(...vals)+1;
+            const range = max-min || 1;
+            const W = 320, H = 90;
+            const pts = data.map((e,i)=>{
+              const x = (i/(data.length-1))*W;
+              const y = H - ((e.poids-min)/range)*H;
+              return `${x},${y}`;
+            }).join(" ");
+            const first = data[0].poids, last = data[data.length-1].poids;
+            const diff = (last-first).toFixed(1);
+            return (
+              <div style={{...S.cardHi,padding:"14px",marginBottom:"16px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"10px"}}>
+                  <div style={{fontSize:"10px",letterSpacing:"2px",color:C.textMuted,textTransform:"uppercase",fontFamily:"monospace"}}>Courbe de poids</div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:"20px",fontWeight:"300",color:diff<=0?C.green:C.red,fontFamily:"monospace"}}>{diff>0?"+":""}{diff} kg</div>
+                    <div style={{fontSize:"9px",color:C.textMuted}}>depuis le début</div>
+                  </div>
+                </div>
+                <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:"80px",overflow:"visible"}}>
+                  <polyline points={pts} fill="none" stroke={diff<=0?C.green:C.red} strokeWidth="2" strokeLinejoin="round"/>
+                  {data.map((e,i)=>{
+                    const x=(i/(data.length-1))*W, y=H-((e.poids-min)/range)*H;
+                    return <circle key={i} cx={x} cy={y} r="3" fill={diff<=0?C.green:C.red}/>;
+                  })}
+                </svg>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:"10px",color:C.textMuted,fontFamily:"monospace",marginTop:"4px"}}>
+                  <span>{data[0].date.slice(5)}</span>
+                  <span>{last} kg</span>
+                  <span>{data[data.length-1].date.slice(5)}</span>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Graphique déficit calorique */}
+          {(()=>{
+            const days = getLastNDays(histRange).filter(dk=>(foods[dk]||[]).length>0);
+            if (days.length < 2) return (
+              <div style={{...S.card,padding:"14px",marginBottom:"16px",fontSize:"12px",color:C.textMuted,textAlign:"center"}}>
+                Pas assez de données nutritionnelles sur cette période
+              </div>
+            );
+            const deficits = days.map(dk=>deficit(dk)||0);
+            const maxAbs = Math.max(...deficits.map(Math.abs),1);
+            const avgDef = Math.round(deficits.reduce((a,v)=>a+v,0)/deficits.length);
+            return (
+              <div style={{...S.cardHi,padding:"14px",marginBottom:"16px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"12px"}}>
+                  <div style={{fontSize:"10px",letterSpacing:"2px",color:C.textMuted,textTransform:"uppercase",fontFamily:"monospace"}}>Déficit calorique ({days.length}j logués)</div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:"18px",fontWeight:"300",color:avgDef>0?C.green:C.red,fontFamily:"monospace"}}>{avgDef>0?"-":"+"}{ Math.abs(avgDef)}</div>
+                    <div style={{fontSize:"9px",color:C.textMuted}}>kcal/j moyen</div>
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:"3px",alignItems:"center",height:"70px"}}>
+                  {days.slice(-Math.min(30,days.length)).map((dk,i)=>{
+                    const def = deficit(dk)||0;
+                    const h = Math.max(2, Math.abs(def)/maxAbs*32);
+                    const d = new Date(dk+"T12:00:00");
+                    return (
+                      <div key={dk} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",height:"70px",gap:"2px"}}>
+                        {def>0&&<div style={{width:"100%",height:`${h}px`,background:C.green,borderRadius:"2px 2px 0 0"}}/>}
+                        <div style={{width:"1px",height:"1px",background:C.border}}/>
+                        {def<0&&<div style={{width:"100%",height:`${h}px`,background:C.red,borderRadius:"0 0 2px 2px"}}/>}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{fontSize:"9px",color:C.textMuted,marginTop:"4px",textAlign:"center"}}>🟢 déficit · 🔴 excès</div>
+              </div>
+            );
+          })()}
+
+          {/* Projection perte de poids */}
+          {(()=>{
+            const loggedDays = getLastNDays(Math.min(histRange,30)).filter(dk=>(foods[dk]||[]).length>0);
+            if (loggedDays.length < 3) return null;
+            const avgDef = loggedDays.reduce((a,dk)=>a+(deficit(dk)||0),0)/loggedDays.length;
+            // 7700 kcal ≈ 1 kg de graisse
+            const kgPerWeek = (avgDef * 7) / 7700;
+            const kgIn30j = (avgDef * 30) / 7700;
+            const kgIn60j = (avgDef * 60) / 7700;
+            const poidsActuel = parseFloat(perf.poids) || 78;
+            return (
+              <div style={{background:"#1a1500",border:`1.5px solid ${C.gold}`,borderRadius:"8px",padding:"14px",marginBottom:"16px"}}>
+                <div style={{fontSize:"10px",letterSpacing:"2px",color:C.gold,marginBottom:"12px",textTransform:"uppercase",fontFamily:"monospace"}}>
+                  Projection · basée sur {loggedDays.length}j logués
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"10px",marginBottom:"10px"}}>
+                  {[
+                    {val:`${Math.abs(kgPerWeek).toFixed(2)} kg`,label:"par semaine",color:avgDef>0?C.green:C.red},
+                    {val:`${Math.abs(kgIn30j).toFixed(1)} kg`,label:"en 30 jours",color:avgDef>0?C.green:C.red},
+                    {val:`${Math.abs(kgIn60j).toFixed(1)} kg`,label:"en 60 jours",color:avgDef>0?C.green:C.red},
+                  ].map((x,i)=>(
+                    <div key={i} style={{textAlign:"center"}}>
+                      <div style={{fontSize:"17px",fontWeight:"300",color:x.color,fontFamily:"monospace"}}>{avgDef>0?"−":"+"}{x.val}</div>
+                      <div style={{fontSize:"9px",color:C.textMuted,marginTop:"2px"}}>{x.label}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{fontSize:"11px",color:C.textSub}}>
+                  Déficit moyen : <span style={{color:avgDef>0?C.green:C.red,fontFamily:"monospace",fontWeight:"600"}}>{avgDef>0?"-":"+"}{Math.abs(Math.round(avgDef))} kcal/j</span>
+                  {poidsActuel && kgIn60j > 0 && <span style={{color:C.textMuted}}> · Poids estimé à 8 sem. : <span style={{color:C.gold,fontFamily:"monospace"}}>{(poidsActuel-kgIn60j).toFixed(1)} kg</span></span>}
+                </div>
+                {avgDef < 100 && avgDef >= 0 && (
+                  <div style={{fontSize:"10px",color:C.gold,marginTop:"8px"}}>⚠️ Déficit très faible — vérifie que tes séances sport sont bien loggées</div>
+                )}
+                {avgDef < 0 && (
+                  <div style={{fontSize:"10px",color:C.red,marginTop:"8px"}}>⚠️ Excès calorique moyen — ajuste tes apports</div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Historique séances */}
+          {(()=>{
+            const days = getLastNDays(histRange);
+            const doneDays = days.filter(dk=>sessions[dk]?.done && !sessions[dk]?.estRepos);
+            const totalMin = doneDays.reduce((s,dk)=>s+(parseFloat(sessions[dk]?.duree)||0),0);
+            const byType = {};
+            doneDays.forEach(dk=>{
+              (sessions[dk].activites||[]).forEach(a=>{
+                byType[a]=(byType[a]||0)+1;
+              });
+            });
+            const LABELS={course_ef:"Course EF",fractionne:"Fractionné",calistenie:"Calisthénie",marche:"Marche",velo:"Vélo",natation:"Natation",yoga:"Yoga",autre:"Autre"};
+            return (
+              <div style={{...S.cardHi,padding:"14px",marginBottom:"16px"}}>
+                <div style={{fontSize:"10px",letterSpacing:"2px",color:C.textMuted,marginBottom:"12px",textTransform:"uppercase",fontFamily:"monospace"}}>Activités ({days.length}j)</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"10px",marginBottom:"12px"}}>
+                  {[
+                    {val:doneDays.length,label:"Séances",color:C.gold},
+                    {val:`${totalMin}min`,label:"Temps total",color:C.blue},
+                    {val:doneDays.length>0?Math.round(totalMin/doneDays.length)+"min":"—",label:"Durée moy.",color:C.green},
+                  ].map((x,i)=>(
+                    <div key={i} style={{textAlign:"center"}}>
+                      <div style={{fontSize:"18px",fontWeight:"300",color:x.color,fontFamily:"monospace"}}>{x.val}</div>
+                      <div style={{fontSize:"9px",color:C.textMuted,marginTop:"2px"}}>{x.label}</div>
+                    </div>
+                  ))}
+                </div>
+                {Object.entries(byType).length>0&&(
+                  <div>
+                    <div style={{fontSize:"9px",color:C.textMuted,marginBottom:"6px",letterSpacing:"1px"}}>PAR TYPE</div>
+                    {Object.entries(byType).sort((a,b)=>b[1]-a[1]).map(([type,count])=>(
+                      <div key={type} style={{display:"flex",alignItems:"center",gap:"10px",marginBottom:"6px"}}>
+                        <span style={{fontSize:"11px",color:C.textSub,width:"100px",flexShrink:0}}>{LABELS[type]||type}</span>
+                        <div style={{flex:1,height:"4px",background:"#111",borderRadius:"2px"}}>
+                          <div style={{height:"100%",width:`${count/doneDays.length*100}%`,background:C.gold,borderRadius:"2px"}}/>
+                        </div>
+                        <span style={{fontSize:"11px",color:C.textMuted,fontFamily:"monospace",width:"30px",textAlign:"right"}}>{count}x</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {/* Journal des dernières séances */}
+                <div style={{marginTop:"14px"}}>
+                  <div style={{fontSize:"9px",color:C.textMuted,marginBottom:"8px",letterSpacing:"1px"}}>DERNIÈRES SÉANCES</div>
+                  {doneDays.slice(-8).reverse().map(dk=>{
+                    const s = sessions[dk];
+                    const d = new Date(dk+"T12:00:00");
+                    return (
+                      <div key={dk} style={{...S.card,padding:"9px 12px",marginBottom:"5px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <div>
+                          <div style={{fontSize:"12px",color:C.text}}>{DAYS_FULL[(d.getDay()+6)%7]} {d.getDate()}/{d.getMonth()+1}</div>
+                          <div style={{fontSize:"10px",color:C.textMuted,marginTop:"2px"}}>{(s.activites||[]).map(a=>LABELS[a]||a).join(" + ")}</div>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontSize:"13px",color:C.gold,fontFamily:"monospace"}}>{s.duree||"—"}min</div>
+                          <div style={{fontSize:"12px"}}>{RESSENTI[+s.ressenti]||""}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+        </>}
+
+        {/* ══ RÉFÉRENCE ══ */}
+        {tab==="reference" && <>
+          {Object.entries(CALISTENIE_BLOCS).map(([bloc,exos])=>(
+            <div key={bloc} style={{...S.card,padding:"14px 16px",marginBottom:"10px"}}>
+              <div style={{fontSize:"10px",color:C.gold,letterSpacing:"3px",marginBottom:"10px",textTransform:"uppercase",fontFamily:"monospace",fontWeight:"700"}}>Bloc {bloc}</div>
+              {exos.map(e=>(
+                <div key={e.ex} style={{display:"flex",justifyContent:"space-between",marginBottom:"8px",alignItems:"center"}}>
+                  <span style={{fontSize:"13px",color:C.text,fontWeight:"500"}}>{e.ex}</span>
+                  <span style={{fontSize:"11px",color:C.textSub,fontFamily:"monospace"}}>{e.sets}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+
+          <div style={{...S.card,padding:"14px 16px",marginBottom:"10px"}}>
+            <div style={{fontSize:"10px",color:C.green,letterSpacing:"3px",marginBottom:"10px",textTransform:"uppercase",fontFamily:"monospace",fontWeight:"700"}}>Étirements post-séance</div>
+            {STRETCHES.map((s,i)=>(
+              <div key={s.name} style={{display:"flex",gap:"10px",marginBottom:"9px",alignItems:"center"}}>
+                <div style={{width:"22px",height:"22px",borderRadius:"50%",background:s.priority?"#1a3a12":"#222",border:`1.5px solid ${s.priority?C.green:C.border}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:"10px",color:s.priority?C.green:C.textMuted,flexShrink:0,fontWeight:"700"}}>{i+1}</div>
+                <div style={{flex:1,fontSize:"13px",color:s.priority?C.text:C.textSub,fontWeight:s.priority?"600":"400"}}>{s.name}</div>
+                <span style={{fontSize:"11px",color:C.textMuted,fontFamily:"monospace"}}>{s.duration}</span>
+              </div>
+            ))}
+          </div>
+
+          {[
+            {icon:"◎",col:C.blue,    label:"EF — Endurance fondamentale",detail:"7:00-7:30/km · pouvoir parler sans essoufflement · 60-70% FC max"},
+            {icon:"◉",col:"#7a8fd4", label:"Fractionné",detail:"6 × 1min rapide / 1min récup · ou 20 min à ~5:30/km"},
+            {icon:"◇",col:C.green,   label:"Règle 80/20",detail:"80% du volume en EF — ne jamais tricher sur la lenteur"},
+          ].map(r=>(
+            <div key={r.label} style={{...S.card,padding:"13px 15px",marginBottom:"8px",display:"flex",gap:"13px"}}>
+              <span style={{color:r.col,fontSize:"16px",flexShrink:0,marginTop:"1px"}}>{r.icon}</span>
+              <div>
+                <div style={{fontSize:"13px",color:C.text,fontWeight:"600",marginBottom:"4px"}}>{r.label}</div>
+                <div style={{fontSize:"11px",color:C.textSub,lineHeight:"1.6"}}>{r.detail}</div>
+              </div>
+            </div>
+          ))}
+        </>}
+      </div>
+
+      {/* ── MODAL SESSION ── */}
+      {sessModal && (()=>{
+        const idx = weekDates.indexOf(sessModal);
+        const prevu = idx !== -1 ? DEFAULT_WEEK_PLAN[idx] : null;
+
+        const ACTIVITES = [
+          {id:"course_ef",  label:"Course EF",        icon:"◎", metMin:9},
+          {id:"fractionne", label:"Fractionné",        icon:"◉", metMin:12},
+          {id:"calistenie", label:"Calisthénie",       icon:"◈", metMin:5},
+          {id:"marche",     label:"Marche",            icon:"◇", metMin:4},
+          {id:"velo",       label:"Vélo",              icon:"○", metMin:8},
+          {id:"natation",   label:"Natation",          icon:"◌", metMin:8},
+          {id:"yoga",       label:"Yoga / Étirements", icon:"◫", metMin:3},
+          {id:"autre",      label:"Autre",             icon:"·", metMin:5},
+        ];
+
+        // Exercices calisthénie avec MET et kcal/min estimés pour 78kg
+        const CALI_EXOS = [
+          {id:"planche",      label:"Planche",               kcalMin:3.5, sets:"3 × 45s"},
+          {id:"planche_lat",  label:"Planche latérale",      kcalMin:3.0, sets:"2 × 30s/côté"},
+          {id:"releve_jambes",label:"Relevés de jambes",     kcalMin:4.0, sets:"3 × 12"},
+          {id:"tuck_lsit",    label:"Tuck L-sit",            kcalMin:4.5, sets:"2 × 10s"},
+          {id:"traction_neg", label:"Tractions négatives",   kcalMin:5.5, sets:"3 × 5"},
+          {id:"traction",     label:"Tractions complètes",   kcalMin:6.0, sets:"3 × max"},
+          {id:"dead_hang",    label:"Dead hang",             kcalMin:3.0, sets:"2 × 25s"},
+          {id:"dips",         label:"Dips",                  kcalMin:5.0, sets:"3 × 8"},
+          {id:"pompes",       label:"Pompes",                kcalMin:4.5, sets:"3 × max"},
+          {id:"pike_pushup",  label:"Pike push-up",          kcalMin:4.0, sets:"2 × 8"},
+          {id:"squat",        label:"Squats",                kcalMin:5.0, sets:"3 × 15"},
+          {id:"fentes",       label:"Fentes",                kcalMin:5.0, sets:"3 × 12"},
+          {id:"gainage_total",label:"Gainage complet",       kcalMin:4.0, sets:"circuit"},
+          {id:"burpees",      label:"Burpees",               kcalMin:8.0, sets:"3 × 10"},
+          {id:"mountain_cl",  label:"Mountain climbers",     kcalMin:7.0, sets:"3 × 30s"},
+        ];
+
+        const LABELS = {course_ef:"Course EF",fractionne:"Fractionné",calistenie:"Calisthénie",marche:"Marche",velo:"Vélo",natation:"Natation",yoga:"Yoga",autre:sessForm.activiteCustom||"Autre"};
+        const activites = sessForm.activites || [];
+        const durees = sessForm.durees || {};
+        const exosCali = sessForm.exosCali || [];
+
+        function toggleActivite(id) {
+          setSessForm(f => {
+            const cur = f.activites || [];
+            const next = cur.includes(id) ? cur.filter(x=>x!==id) : [...cur, id];
+            return {...f, activites: next, estRepos: false};
+          });
+        }
+
+        function toggleExoCali(id) {
+          setSessForm(f => {
+            const cur = f.exosCali || [];
+            return {...f, exosCali: cur.includes(id) ? cur.filter(x=>x!==id) : [...cur, id]};
+          });
+        }
+
+        function setDuree(actId, val) {
+          setSessForm(f => ({...f, durees: {...(f.durees||{}), [actId]: val}}));
+        }
+
+        function setAllure(actId, val) {
+          setSessForm(f => ({...f, allures: {...(f.allures||{}), [actId]: val}}));
+        }
+
+        const allures = sessForm.allures || {};
+
+        // Formule Minetti et al. pour la course, MET corrigé pour le reste
+        function estimateCal() {
+          let total = 0;
+          const poids = 78;
+          activites.forEach(actId => {
+            const act = ACTIVITES.find(a=>a.id===actId);
+            const dur = parseFloat(durees[actId]) || 0;
+            if (!act || dur === 0) return;
+
+            if ((actId === "course_ef" || actId === "fractionne") && allures[actId]) {
+              // Formule Minetti : 0.9 kcal/kg/km, modulée légèrement par l'allure
+              const allureMin = parseFloat(allures[actId]);
+              if (!isNaN(allureMin) && allureMin > 0) {
+                const vitesseKmh = 60 / allureMin;
+                const distKm = vitesseKmh * (dur / 60);
+                // Légère correction anaérobie si allure < 5 min/km (+8%)
+                const coeff = allureMin < 5 ? 1.08 : 1.0;
+                total += Math.round(0.9 * poids * distKm * coeff);
+                return;
+              }
+            }
+            if (actId === "calistenie" && exosCali.length > 0) {
+              const avgKcal = exosCali.reduce((s,eid)=>{
+                const ex = CALI_EXOS.find(e=>e.id===eid);
+                return s + (ex?.kcalMin||5);
+              },0) / exosCali.length;
+              total += Math.round(avgKcal * dur * 0.5);
+            } else if (actId === "calistenie") {
+              total += Math.round((act.metMin * poids * dur * 0.5) / 200);
+            } else {
+              total += Math.round((act.metMin * poids * dur) / 200);
+            }
+          });
+          return total;
+        }
+
+        const totalDuree = activites.reduce((s,a)=>s+(parseFloat(durees[a])||0),0);
+        const calEstim = estimateCal();
+
+        return (
+          <div style={{position:"fixed",inset:0,background:C.overlay,zIndex:300,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+            onClick={()=>setSessModal(null)}>
+            <div onClick={e=>e.stopPropagation()} style={{background:"#1a1a1a",border:`2px solid ${C.border}`,borderRadius:"16px 16px 0 0",padding:"22px 18px",width:"100%",maxWidth:"480px",maxHeight:"93vh",overflowY:"auto"}}>
+
+              <div style={{fontSize:"10px",letterSpacing:"3px",color:C.textMuted,marginBottom:"14px",textTransform:"uppercase",fontFamily:"monospace"}}>
+                Logger · {DAYS_FULL[idx]||"—"}{prevu?` · Prévu : ${prevu.label}`:""}
+              </div>
+
+              {/* Repos toggle */}
+              <div style={{marginBottom:"14px"}}>
+                <label style={S.label}>Type de journée</label>
+                <div style={{display:"flex",gap:"8px"}}>
+                  <button onClick={()=>setSessForm(f=>({...f,estRepos:false,activites:f.activites?.length?f.activites:(prevu?.type==="repos"?[]:prevu?.type==="course"?["course_ef"]:["calistenie"])}))} style={{
+                    flex:1,padding:"10px",background:!sessForm.estRepos?"#2a2000":"#1e1e1e",
+                    border:!sessForm.estRepos?`1.5px solid ${C.gold}`:`1.5px solid ${C.border}`,
+                    color:!sessForm.estRepos?C.gold:C.textMuted,borderRadius:"6px",cursor:"pointer",fontSize:"12px",fontWeight:!sessForm.estRepos?"700":"400",
+                  }}>💪 Activité</button>
+                  <button onClick={()=>setSessForm(f=>({...f,estRepos:true,activites:[],durees:{},exosCali:[]}))} style={{
+                    flex:1,padding:"10px",background:sessForm.estRepos?"#0a1a2a":"#1e1e1e",
+                    border:sessForm.estRepos?`1.5px solid ${C.blue}`:`1.5px solid ${C.border}`,
+                    color:sessForm.estRepos?C.blue:C.textMuted,borderRadius:"6px",cursor:"pointer",fontSize:"12px",fontWeight:sessForm.estRepos?"700":"400",
+                  }}>◇ Repos / Récup</button>
+                </div>
+              </div>
+
+              {!sessForm.estRepos && <>
+                {/* Sélection activités */}
+                <div style={{marginBottom:"14px"}}>
+                  <label style={S.label}>Activité(s) <span style={{color:C.textMuted,fontWeight:"400"}}>(multi-sélection)</span></label>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:"5px"}}>
+                    {ACTIVITES.map(a=>{
+                      const sel = activites.includes(a.id);
+                      return (
+                        <button key={a.id} onClick={()=>toggleActivite(a.id)} style={{
+                          padding:"6px 10px",
+                          background:sel?"#2a2000":"#1e1e1e",
+                          border:sel?`1.5px solid ${C.gold}`:`1.5px solid ${C.border}`,
+                          color:sel?C.gold:C.textSub,
+                          borderRadius:"6px",fontSize:"11px",cursor:"pointer",fontWeight:sel?"700":"400",
+                        }}>{a.icon} {a.label}</button>
+                      );
+                    })}
+                  </div>
+                  {activites.includes("autre") && (
+                    <input value={sessForm.activiteCustom||""} onChange={e=>setSessForm(f=>({...f,activiteCustom:e.target.value}))}
+                      placeholder="Préciser…" style={{...S.input,marginTop:"8px"}}/>
+                  )}
+                </div>
+
+                {/* Durée + allure par activité */}
+                {activites.length > 0 && (
+                  <div style={{marginBottom:"14px"}}>
+                    <label style={S.label}>Durée & détails par activité</label>
+                    {activites.map(actId=>{
+                      const act = ACTIVITES.find(a=>a.id===actId);
+                      const isCourse = actId==="course_ef"||actId==="fractionne";
+                      const dur = parseFloat(durees[actId])||0;
+                      const allure = allures[actId]||"";
+                      // Calcul distance si allure renseignée
+                      const dist = (isCourse && allure && dur) ? (60/parseFloat(allure)*dur/60).toFixed(1) : null;
+                      return (
+                        <div key={actId} style={{marginBottom:"12px",background:"#111",border:`1px solid ${C.border}`,borderRadius:"6px",padding:"10px 12px"}}>
+                          <div style={{fontSize:"12px",color:C.text,fontWeight:"600",marginBottom:"8px"}}>{act?.icon} {LABELS[actId]}</div>
+                          <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+                            <div style={{flex:1}}>
+                              <div style={{fontSize:"9px",color:C.textMuted,marginBottom:"4px",letterSpacing:"1px"}}>DURÉE (min)</div>
+                              <input value={durees[actId]||""} onChange={e=>setDuree(actId,e.target.value)}
+                                placeholder="ex: 45" type="number"
+                                style={{...S.input,padding:"8px",textAlign:"center"}}/>
+                            </div>
+                            {isCourse && (
+                              <div style={{flex:1}}>
+                                <div style={{fontSize:"9px",color:C.textMuted,marginBottom:"4px",letterSpacing:"1px"}}>ALLURE (min/km)</div>
+                                <input value={allure} onChange={e=>setAllure(actId,e.target.value)}
+                                  placeholder="ex: 7.0" type="number" step="0.1"
+                                  style={{...S.input,padding:"8px",textAlign:"center"}}/>
+                              </div>
+                            )}
+                          </div>
+                          {isCourse && dist && dur > 0 && (
+                            <div style={{fontSize:"10px",color:C.green,marginTop:"6px",fontFamily:"monospace"}}>
+                              📍 Distance estimée : {dist} km
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {totalDuree > 0 && (
+                      <div style={{fontSize:"11px",color:C.textMuted,marginTop:"4px",fontFamily:"monospace"}}>
+                        Total : {totalDuree} min
+                        {calEstim > 0 && <span style={{color:C.gold}}> · ≈ {calEstim} kcal <span style={{color:C.textMuted,fontSize:"10px"}}>(Minetti pour la course, ×0.5 pour calisthénie)</span></span>}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Détail calisthénie */}
+                {activites.includes("calistenie") && (
+                  <div style={{marginBottom:"14px"}}>
+                    <label style={S.label}>Exercices calisthénie <span style={{color:C.textMuted,fontWeight:"400"}}>(optionnel — affine le calcul)</span></label>
+                    <div style={{background:"#111",border:`1px solid ${C.border}`,borderRadius:"6px",padding:"10px",display:"flex",flexDirection:"column",gap:"5px",maxHeight:"220px",overflowY:"auto"}}>
+                      {CALI_EXOS.map(ex=>{
+                        const sel = exosCali.includes(ex.id);
+                        return (
+                          <button key={ex.id} onClick={()=>toggleExoCali(ex.id)} style={{
+                            display:"flex",justifyContent:"space-between",alignItems:"center",
+                            padding:"8px 10px",
+                            background:sel?"#1e2a10":"#1a1a1a",
+                            border:sel?`1px solid ${C.green}`:`1px solid ${C.border}`,
+                            color:sel?C.green:C.textSub,
+                            borderRadius:"5px",cursor:"pointer",textAlign:"left",
+                          }}>
+                            <span style={{fontSize:"12px",fontWeight:sel?"600":"400"}}>{sel?"✓ ":""}{ex.label}</span>
+                            <span style={{fontSize:"10px",color:C.textMuted,fontFamily:"monospace"}}>≈{ex.kcalMin} kcal/min</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {exosCali.length > 0 && (
+                      <div style={{fontSize:"10px",color:C.textMuted,marginTop:"6px",padding:"6px 8px",background:"#111",borderRadius:"4px"}}>
+                        💡 Valeurs indicatives (Ciqual/ACSM) pour 78 kg · repos inclus · ±20% selon intensité
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Résumé */}
+                {activites.length > 0 && (
+                  <div style={{padding:"9px 12px",background:"#1a1500",border:`1px solid ${C.gold}`,borderRadius:"6px",fontSize:"11px",color:C.gold,marginBottom:"14px"}}>
+                    {activites.length>1?"Combiné : ":""}{activites.map(a=>LABELS[a]).join(" + ")}
+                    {prevu&&prevu.type!=="repos"&&!activites.some(a=>prevu.label.toLowerCase().includes(a.replace("_"," ").split("_")[0]))&&
+                      <span style={{color:C.textSub}}> · (prévu : {prevu.label})</span>}
+                  </div>
+                )}
+
+                {/* Ressenti */}
+                <div style={{marginBottom:"13px"}}>
+                  <label style={S.label}>Ressenti global</label>
+                  <div style={{display:"flex",gap:"6px"}}>
+                    {["1","2","3","4","5"].map(v=>(
+                      <button key={v} onClick={()=>setSessForm(f=>({...f,ressenti:v}))} style={{
+                        flex:1,padding:"10px 3px",
+                        background:sessForm.ressenti===v?"#2a2000":"#1e1e1e",
+                        border:sessForm.ressenti===v?`2px solid ${C.gold}`:`1.5px solid ${C.border}`,
+                        borderRadius:"6px",cursor:"pointer",fontSize:"20px",
+                      }}>{RESSENTI[+v]}</button>
+                    ))}
+                  </div>
+                </div>
+              </>}
+
+              {/* Note */}
+              <div style={{marginBottom:"18px"}}>
+                <label style={S.label}>Note</label>
+                <textarea value={sessForm.note} onChange={e=>setSessForm(f=>({...f,note:e.target.value}))}
+                  placeholder={sessForm.estRepos?"Récupération, étirements, marche légère…":"Sensations, allure, douleurs, météo…"}
+                  rows={2} style={{...S.input,resize:"none"}}/>
+              </div>
+
+              <div style={{display:"flex",gap:"10px"}}>
+                <button onClick={()=>saveSession(sessModal)} style={{flex:1,padding:"13px",background:C.gold,color:"#111",border:"none",borderRadius:"6px",fontSize:"12px",fontWeight:"800",cursor:"pointer",letterSpacing:"1px"}}>VALIDER</button>
+                {sessions[sessModal]?.done&&<button onClick={()=>delSession(sessModal)} style={{padding:"13px 15px",background:"none",color:C.red,border:`1.5px solid ${C.red}`,borderRadius:"6px",fontSize:"11px",cursor:"pointer"}}>Effacer</button>}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── MODAL FOOD ── */}
+      {foodModal && (
+        <div style={{position:"fixed",inset:0,background:C.overlay,zIndex:300,display:"flex",alignItems:"flex-end",justifyContent:"center"}}
+          onClick={()=>{setFoodModal(false);setSearch("");setCatFilter("Tout");setPicked(null);setQty("");}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:"#1a1a1a",border:`2px solid ${C.border}`,borderRadius:"16px 16px 0 0",padding:"20px 18px",width:"100%",maxWidth:"480px",maxHeight:"90vh",overflowY:"auto"}}>
+            <div style={{fontSize:"10px",letterSpacing:"3px",color:C.textMuted,marginBottom:"14px",textTransform:"uppercase",fontFamily:"monospace"}}>
+              Ajouter · {(()=>{const d=new Date(foodDate+"T12:00:00");return `${d.getDate()}/${d.getMonth()+1}`;})()}
+            </div>
+
+            {/* Repas */}
+            <div style={{marginBottom:"12px"}}>
+              <label style={S.label}>Repas</label>
+              <div style={{display:"flex",gap:"5px",flexWrap:"wrap"}}>
+                {MEALS.map(m=>(
+                  <button key={m} onClick={()=>setMeal(m)} style={S.tag(meal===m)}>{m}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* Mode */}
+            <div style={{display:"flex",gap:"6px",marginBottom:"12px"}}>
+              {[["db","Base alimentaire"],["custom","Saisie libre"]].map(([id,label])=>(
+                <button key={id} onClick={()=>setMode(id)} style={{flex:1,padding:"8px",background:mode===id?C.cardHi:"#111",border:mode===id?`1.5px solid ${C.gold}`:`1.5px solid ${C.border}`,color:mode===id?C.gold:C.textMuted,borderRadius:"6px",fontSize:"10px",cursor:"pointer",letterSpacing:"1px",fontWeight:mode===id?"700":"400"}}>{label}</button>
+              ))}
+            </div>
+
+            {mode==="db"?<>
+              {/* Récents */}
+              {recentFoods.length > 0 && !search && catFilter === "Tout" && !picked && (
+                <div style={{marginBottom:"10px"}}>
+                  <div style={{fontSize:"9px",color:C.textMuted,letterSpacing:"2px",marginBottom:"6px",textTransform:"uppercase",fontFamily:"monospace"}}>Récents</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:"3px",maxHeight:"150px",overflowY:"auto"}}>
+                    {recentFoods.map(e=>(
+                      <button key={e.name} onClick={()=>{
+                        const f = FOOD_DB.find(x=>x.name===e.name);
+                        if (f) { setPicked(f); setSearch(f.name); }
+                        else { setPicked({name:e.name,cal100:e.cal,prot100:e.prot,unit:"g",unitG:100,cat:"Tout"}); setSearch(e.name); }
+                      }} style={{background:"#111",border:`1px solid ${C.border}`,color:C.text,padding:"7px 12px",borderRadius:"5px",cursor:"pointer",textAlign:"left",display:"flex",justifyContent:"space-between",fontSize:"12px"}}>
+                        <span>{e.name}</span>
+                        <span style={{fontSize:"10px",color:C.textMuted,fontFamily:"monospace"}}>{e.cal} kcal</span>
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{height:"1px",background:C.border,margin:"10px 0"}}/>
+                </div>
+              )}
+              {/* Catégories */}
+              <div style={{marginBottom:"8px",overflowX:"auto",whiteSpace:"nowrap",paddingBottom:"4px"}}>
+                {FOOD_CATS.map(c=>(
+                  <button key={c} onClick={()=>{setCatFilter(c);setPicked(null);}} style={{...S.tag(catFilter===c),display:"inline-block",marginRight:"5px",whiteSpace:"nowrap"}}>{c}</button>
+                ))}
+              </div>
+              <input value={search} onChange={e=>{setSearch(e.target.value);setPicked(null);}} placeholder={`Chercher${catFilter!=="Tout"?` dans ${catFilter}`:""}…`} style={{...S.input,marginBottom:"8px"}}/>
+              <div style={{display:"flex",flexDirection:"column",gap:"4px",maxHeight:"200px",overflowY:"auto",marginBottom:"10px"}}>
+                {filteredDB.map(f=>(
+                  <button key={f.name} onClick={()=>{setPicked(f);setSearch(f.name);}} style={{
+                    background:picked?.name===f.name?"#2a2000":"#111",
+                    border:picked?.name===f.name?`1.5px solid ${C.gold}`:`1px solid ${C.border}`,
+                    color:C.text,padding:"9px 12px",borderRadius:"5px",cursor:"pointer",
+                    textAlign:"left",display:"flex",justifyContent:"space-between",fontSize:"13px",
+                  }}>
+                    <span style={{fontWeight:picked?.name===f.name?"600":"400"}}>{f.name}</span>
+                    <span style={{fontSize:"11px",color:C.textMuted,fontFamily:"monospace"}}>{f.cal100} kcal/{f.unit==="g"||f.unit==="ml"?"100"+f.unit:f.unit}</span>
+                  </button>
+                ))}
+                {filteredDB.length===0&&search&&<div style={{fontSize:"11px",color:C.textMuted,padding:"10px",textAlign:"center"}}>Aucun résultat — essaie d'autres termes</div>}
+              </div>
+              {picked&&<>
+                <label style={S.label}>Quantité ({picked.unit==="g"?"grammes":picked.unit==="ml"?"ml":picked.unit==="unité"?"unités":picked.unit})</label>
+                <input value={qty} onChange={e=>{
+                  const v=e.target.value;
+                  if(v===""||(!isNaN(parseFloat(v))&&parseFloat(v)>=0)) setQty(v);
+                }} placeholder={picked.unit==="g"||picked.unit==="ml"?`ex: ${picked.unitG}`:"ex: 1"} type="number"
+                style={{...S.input,marginBottom:"6px",border:`1.5px solid ${qty&&parseFloat(qty)<=0?C.red:C.border}`}}/>
+                {qty&&parseFloat(qty)<=0&&<div style={{fontSize:"10px",color:C.red,marginBottom:"6px"}}>Quantité doit être supérieure à 0</div>}
+                {qty&&parseFloat(qty)>0&&<div style={{padding:"8px 12px",background:"#111",border:`1px solid ${C.border}`,borderRadius:"5px",fontSize:"12px",color:C.gold,marginBottom:"10px",fontFamily:"monospace"}}>
+                  {(()=>{const r=calcQty(picked,qty);return `≈ ${r.cal} kcal · ${r.prot}g protéines`;})()}
+                </div>}
+              </>}
+            </>:<>
+              <label style={S.label}>Nom du repas / aliment</label>
+              <input value={custom.name} onChange={e=>setCustom(c=>({...c,name:e.target.value}))} placeholder="ex: Salade maison" style={{...S.input,marginBottom:"8px"}}/>
+              <div style={{display:"flex",gap:"8px",marginBottom:"10px"}}>
+                <div style={{flex:1}}>
+                  <label style={S.label}>Calories (kcal)</label>
+                  <input value={custom.cal} onChange={e=>{
+                    const v=e.target.value;
+                    if(v===""||(!isNaN(parseFloat(v))&&parseFloat(v)>=0&&parseFloat(v)<=9999)) setCustom(c=>({...c,cal:v}));
+                  }} placeholder="ex: 450" type="number"
+                  style={{...S.input,border:`1.5px solid ${custom.cal&&(isNaN(parseFloat(custom.cal))||parseFloat(custom.cal)<0)?C.red:C.border}`}}/>
+                  {custom.cal&&(isNaN(parseFloat(custom.cal))||parseFloat(custom.cal)<0)&&<div style={{fontSize:"10px",color:C.red,marginTop:"3px"}}>Valeur invalide</div>}
+                </div>
+                <div style={{flex:1}}>
+                  <label style={S.label}>Protéines (g)</label>
+                  <input value={custom.prot} onChange={e=>{
+                    const v=e.target.value;
+                    if(v===""||(!isNaN(parseFloat(v))&&parseFloat(v)>=0&&parseFloat(v)<=500)) setCustom(c=>({...c,prot:v}));
+                  }} placeholder="ex: 25" type="number"
+                  style={{...S.input,border:`1.5px solid ${custom.prot&&(isNaN(parseFloat(custom.prot))||parseFloat(custom.prot)<0)?C.red:C.border}`}}/>
+                </div>
+              </div>
+            </>}
+
+            {(()=>{
+              const canAdd = (mode==="db"&&picked&&qty&&parseFloat(qty)>0) || (mode==="custom"&&custom.name&&custom.cal&&parseFloat(custom.cal)>0);
+              return (
+                <button onClick={addFood} disabled={!canAdd} style={{width:"100%",padding:"14px",background:canAdd?C.gold:"#333",color:canAdd?"#111":C.textMuted,border:"none",borderRadius:"6px",fontSize:"12px",fontWeight:"800",cursor:canAdd?"pointer":"not-allowed",letterSpacing:"1px",transition:"all .2s"}}>AJOUTER</button>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
